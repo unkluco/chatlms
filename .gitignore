@@ -1,0 +1,55 @@
+# =========================
+# Secrets / local config
+# =========================
+config.json
+auth.json
+.env
+.env.*
+
+# =========================
+# Runtime state
+# =========================
+processed.json
+*.log
+
+# =========================
+# Python
+# =========================
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# =========================
+# Playwright / browser data
+# =========================
+.browser_profile/
+playwright-report/
+test-results/
+
+# =========================
+# IDE / editor
+# =========================
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# =========================
+# OS generated files
+# =========================
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# =========================
+# Temporary files
+# =========================
+*.tmp
+*.temp
+~$*
