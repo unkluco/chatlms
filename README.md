@@ -148,6 +148,22 @@ API key của Groq.
 "groq_api_key": "gsk_..."
 ```
 
+Nếu chưa có API key, hãy tìm hiểu với từ khóa **"Groq API key"** hoặc truy cập trang chính thức của Groq để tạo key:
+
+- Groq Console: https://console.groq.com/
+- Groq API Keys: https://console.groq.com/keys
+- Groq Documentation: https://console.groq.com/docs/
+
+Quy trình cơ bản:
+
+1. Đăng ký hoặc đăng nhập tài khoản Groq.
+2. Mở mục **API Keys**.
+3. Tạo một API key mới.
+4. Copy key và dán vào giá trị `groq_api_key` trong `config.json`.
+5. Không chia sẻ key và không commit `config.json` lên GitHub.
+
+> Tên đúng của dịch vụ là **Groq**. Khi tìm kiếm trên Google nên dùng từ khóa `Groq API key` để tránh nhầm với Grok của xAI.
+
 Không đưa API key lên GitHub hoặc gửi cho người khác.
 
 ---
