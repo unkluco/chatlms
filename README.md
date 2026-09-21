@@ -2,6 +2,29 @@
 
 Bot theo dõi blog cá nhân trên LMS IUH, phát hiện mẫu kích hoạt trong bài viết, gửi nội dung câu hỏi đến AI và đăng câu trả lời dưới dạng comment.
 
+## Cài đặt từ GitHub
+
+Clone project về máy:
+
+```bash
+git clone https://github.com/unkluco/chatlms.git
+cd chatlms
+```
+
+Sau khi clone:
+
+1. Mở thư mục project.
+2. Tạo file `config.json` theo mẫu cấu hình trong README này.
+3. Điền tài khoản LMS, mật khẩu LMS và Groq API key của riêng bạn.
+4. Không commit `config.json` vì file này chứa thông tin bí mật và đã được thêm vào `.gitignore`.
+5. Chạy `START_BOT.bat`.
+
+Ở lần chạy đầu tiên, file BAT sẽ tự tạo `.venv` và cài các dependency cần thiết vào môi trường Python riêng của project.
+
+> Nếu repository được đổi tên khi clone, chỉ cần `cd` vào đúng thư mục vừa clone; không bắt buộc thư mục phải tên `lms_bot`.
+
+---
+
 ## 1. Chạy bot
 
 Chạy file:
@@ -543,7 +566,38 @@ nghĩa là bot đã nhận được mẫu kích hoạt.
 
 ---
 
-## 8. Lưu ý bảo mật
+## 8. Khuyến nghị khi đăng câu hỏi trên LMS
+
+Khi dùng bot để hỏi AI thông qua Blog trên LMS, nên để bài viết ở trạng thái **bản nháp / không công khai** nếu LMS cho phép.
+
+Mục đích:
+
+- Hạn chế người khác nhìn thấy câu hỏi đang dùng để gọi bot.
+- Tránh làm Blog cá nhân bị đầy các bài test hoặc câu hỏi kỹ thuật.
+- Giảm nguy cơ vô tình công khai nội dung riêng tư, bài tập hoặc dữ liệu chưa muốn chia sẻ.
+- Vẫn có thể để bot đọc bài của chính tài khoản đang đăng nhập nếu trạng thái nháp của LMS cho phép tài khoản chủ bài truy cập bình thường.
+
+Quy trình khuyến nghị:
+
+```text
+Tạo bài Blog
+    ↓
+Đặt ở chế độ Nháp / Không công khai
+    ↓
+Thêm detect_pattern, ví dụ: #bot
+    ↓
+Nhập câu hỏi
+    ↓
+Lưu bài
+    ↓
+Bot phát hiện và trả lời bằng comment
+```
+
+> Không nên đăng công khai chỉ để gọi bot nếu nội dung câu hỏi không cần chia sẻ với người khác. Nếu LMS thay đổi cách xử lý bài nháp hoặc không cho comment ở bài nháp, hãy kiểm tra lại bằng một bài test trước.
+
+---
+
+## 9. Lưu ý bảo mật
 
 `config.json` hiện chứa:
 
