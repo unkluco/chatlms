@@ -1,69 +1,97 @@
 # IUH LMS Blog Bot
 
-Bot theo dõi blog cá nhân trên LMS IUH, phát hiện mẫu kích hoạt trong bài viết, gửi nội dung câu hỏi đến AI và đăng câu trả lời dưới dạng comment.
+Bot theo dõi Blog cá nhân trên LMS IUH, tìm bài có mẫu kích hoạt, gửi câu hỏi và nội dung file đính kèm sang AI Groq, sau đó đăng câu trả lời dưới dạng comment ngay trên LMS.
 
-## Cài đặt từ GitHub
+## Tính năng hiện tại
 
-Clone project về máy:
+- Tự đăng nhập LMS bằng tài khoản trong `config.json`.
+- Giữ session bằng profile riêng `.browser_profile`; nếu session còn sống thì dùng lại.
+- Tự đăng nhập lại khi session hết hạn hoặc bị văng khỏi LMS.
+- Tự reconnect và tạo lại browser khi mất mạng/browser lỗi; host không tự dừng vì một lỗi tạm thời.
+- Tự xác định `userid` của tài khoản đang đăng nhập, không cần nhập ID Blog thủ công.
+- Quét Blog theo chu kỳ và chỉ xử lý bài có mẫu kích hoạt.
+- Hỗ trợ tìm mẫu kích hoạt trong tiêu đề, nội dung hoặc cả hai.
+- Hỗ trợ lệnh phụ cấu hình được như `#short`, `#code`, `#nocmt`.
+- Đọc file đính kèm: PDF, DOCX, XLSX, CSV và nhiều định dạng text/code.
+- Giới hạn số file, dung lượng và lượng text trích xuất để tránh prompt quá lớn.
+- Lưu `processed.json` để tránh comment lặp lại cùng bài.
+- Chống chạy hai bot cùng tài khoản trên Windows bằng single-instance mutex.
+- Chạy trong Windows Job Object: đóng cửa sổ launcher thì Python và browser của bot cũng dừng theo.
+- Tự tạo `.venv` và tự cài dependency cần thiết khi chạy `START_BOT.bat`.
+
+## Thay đổi gần đây
+
+- Sửa logic nhận diện trạng thái đăng nhập: không còn nhầm trang `/login/index.php` là đã logout khi session thực tế vẫn còn.
+- Thêm tự đăng nhập lại khi session hết và tự reconnect khi browser/mạng lỗi.
+- Thêm đọc nội dung file đính kèm trực tiếp từ bài Blog.
+- Thêm `in_progress` + single-instance mutex để giảm nguy cơ comment trùng.
+- Thêm Windows Job Object để đóng launcher là dừng luôn Python và browser của bot.
+- Sửa `only_new_posts` để baseline chỉ tạo một lần trong mỗi lần chạy, kể cả sau reconnect.
+
+---
+
+## 1. Cài đặt từ GitHub
 
 ```bash
 git clone https://github.com/unkluco/chatlms.git
 cd chatlms
 ```
 
+Yêu cầu khuyến nghị:
+
+- Windows 10/11.
+- Python 3 đã cài trên máy.
+- Google Chrome hoặc Microsoft Edge.
+- Tài khoản LMS IUH hợp lệ.
+- Groq API key.
+
 Sau khi clone:
 
-1. Mở thư mục project.
-2. Tạo file `config.json` theo mẫu cấu hình trong README này.
-3. Điền tài khoản LMS, mật khẩu LMS và Groq API key của riêng bạn.
-4. Không commit `config.json` vì file này chứa thông tin bí mật và đã được thêm vào `.gitignore`.
-5. Chạy `START_BOT.bat`.
+1. Tạo `config.json` trong thư mục project.
+2. Điền tài khoản LMS, mật khẩu và Groq API key.
+3. Chạy `START_BOT.bat`.
+4. Lần đầu bot sẽ tự tạo `.venv` và cài thư viện cần thiết.
 
-Ở lần chạy đầu tiên, file BAT sẽ tự tạo `.venv` và cài các dependency cần thiết vào môi trường Python riêng của project.
-
-> Nếu repository được đổi tên khi clone, chỉ cần `cd` vào đúng thư mục vừa clone; không bắt buộc thư mục phải tên `lms_bot`.
+`config.json`, `.browser_profile`, `.attachments`, `processed.json` và `.venv` đều là dữ liệu local và đã được bỏ qua trong Git.
 
 ---
 
-## 1. Chạy bot
+## 2. Chạy bot
 
-Chạy file:
+Chạy:
 
 ```text
 START_BOT.bat
 ```
 
-File BAT sẽ:
+Launcher hiện thực hiện các bước:
 
-1. Kiểm tra thư mục `.venv`.
-2. Nếu chưa có thì tự tạo môi trường Python riêng.
-3. Kiểm tra/cài Playwright và Groq SDK trong `.venv`.
-4. Chạy `lms_blog_bot.py`.
+1. Kiểm tra `.venv`; nếu lỗi hoặc chưa có thì tự tạo lại.
+2. Kiểm tra `pip`.
+3. Cài/kiểm tra `playwright`.
+4. Cài/kiểm tra `groq`.
+5. Cài/kiểm tra `pypdf`, `python-docx`, `openpyxl`.
+6. Gọi `RUN_BOT_JOB.ps1` để chạy bot trong Windows Job Object.
 
-Không cài package vào Python global.
+Khi đóng cửa sổ `START_BOT.bat`, Job Object sẽ dừng cả Python và browser con của bot, tránh tình trạng bot vẫn chạy ngầm.
 
 ---
 
-## 2. File cấu hình
+## 3. Cấu hình đầy đủ
 
-Toàn bộ cấu hình nằm trong:
-
-```text
-config.json
-```
-
-Ví dụ:
+Ví dụ cấu hình đang phù hợp với phiên bản hiện tại:
 
 ```json
 {
   "lms_base_url": "https://lms.iuh.edu.vn",
-  "username": "...",
-  "password": "...",
+  "username": "YOUR_LMS_USERNAME",
+  "password": "YOUR_LMS_PASSWORD",
   "provider": "groq",
-  "groq_api_key": "...",
+  "groq_api_key": "gsk_...",
   "ai_model": "",
   "detect_pattern": "@bot",
-  "default_system_prompt": "Trả lời đúng trọng tâm câu hỏi, rõ ràng, tự nhiên và hữu ích. Không nhắc đến mẫu kích hoạt hoặc việc bạn là bot. không dùng latex hay markdown mà chỉ trả lời kiểu text",
+  "trigger_position": "title",
+  "default_system_prompt": "Trả lời đúng trọng tâm câu hỏi, rõ ràng, tự nhiên và hữu ích.",
   "poll_interval_seconds": 6,
   "max_posts_per_scan": 10,
   "max_answer_length": 6000,
@@ -71,560 +99,404 @@ Ví dụ:
   "retry_delay_seconds": 2,
   "cooldown_seconds": 0,
   "only_new_posts": true,
-  "trigger_position": "title",
   "debug": true,
   "headless": true,
+  "reconnect_delay_seconds": 5,
+  "login_retry_seconds": 5,
   "commands": {
     "#short": {
-      "system_prompt": "Trả lời thật ngắn gọn, chỉ nêu ý chính cần thiết. Không nhắc đến lệnh kích hoạt hoặc việc bạn là bot."
+      "system_prompt": "Trả lời thật ngắn gọn, chỉ nêu ý chính cần thiết."
     },
     "#code": {
-      "system_prompt": "Ưu tiên giải thích theo hướng lập trình. Nếu phù hợp, đưa ra code hoàn chỉnh, dễ đọc, kèm giải thích ngắn về ý tưởng và độ phức tạp. Không nhắc đến lệnh kích hoạt hoặc việc bạn là bot."
+      "system_prompt": "Ưu tiên giải thích theo hướng lập trình và đưa code khi phù hợp."
     },
-	"#nocmt": {
-      "system_prompt": "Nếu trả lời code thì không có phần giải thích kiểu cmt, chỉ đưa ra câu trả lời trực tiếp. Không nhắc đến lệnh kích hoạt hoặc việc bạn là bot."
+    "#nocmt": {
+      "system_prompt": "Nếu trả lời code thì chỉ đưa câu trả lời trực tiếp, không thêm phần giải thích kiểu comment."
     }
-  }
-}
-```
-
----
-
-## 3. Các option
-
-### `lms_base_url`
-
-Địa chỉ gốc của LMS.
-
-```json
-"lms_base_url": "https://lms.iuh.edu.vn"
-```
-
-Thông thường không cần đổi.
-
----
-
-### `username`
-
-Tài khoản đăng nhập LMS.
-
-```json
-"username": "..."
-```
-
-Bot dùng tài khoản này để tự đăng nhập.
-
----
-
-### `password`
-
-Mật khẩu LMS.
-
-```json
-"password": "..."
-```
-
-Không chia sẻ file `config.json` vì file này chứa thông tin đăng nhập.
-
----
-
-### `provider`
-
-Nhà cung cấp AI.
-
-Hiện tại bot hỗ trợ:
-
-```json
-"provider": "groq"
-```
-
----
-
-### `groq_api_key`
-
-API key của Groq.
-
-```json
-"groq_api_key": "gsk_..."
-```
-
-Nếu chưa có API key, hãy tìm hiểu với từ khóa **"Groq API key"** hoặc truy cập trang chính thức của Groq để tạo key:
-
-- Groq Console: https://console.groq.com/
-- Groq API Keys: https://console.groq.com/keys
-- Groq Documentation: https://console.groq.com/docs/
-
-Quy trình cơ bản:
-
-1. Đăng ký hoặc đăng nhập tài khoản Groq.
-2. Mở mục **API Keys**.
-3. Tạo một API key mới.
-4. Copy key và dán vào giá trị `groq_api_key` trong `config.json`.
-5. Không chia sẻ key và không commit `config.json` lên GitHub.
-
-> Tên đúng của dịch vụ là **Groq**. Khi tìm kiếm trên Google nên dùng từ khóa `Groq API key` để tránh nhầm với Grok của xAI.
-
-Không đưa API key lên GitHub hoặc gửi cho người khác.
-
----
-
-### `ai_model`
-
-Model AI dùng để trả lời.
-
-Nếu để trống:
-
-```json
-"ai_model": ""
-```
-
-bot mặc định dùng:
-
-```text
-openai/gpt-oss-120b
-```
-
-Có thể nhập model khác nếu Groq hỗ trợ.
-
----
-
-### `detect_pattern`
-
-Mẫu kích hoạt chính của bot.
-
-Ví dụ:
-
-```json
-"detect_pattern": "#bot"
-```
-
-Khi đó bài viết:
-
-```text
-#bot
-Giải thích Dijkstra cho tôi.
-```
-
-sẽ được bot xử lý.
-
-Có thể đổi thành:
-
-```json
-"detect_pattern": "[[BOT]]"
-```
-
-hoặc:
-
-```json
-"detect_pattern": "@ai"
-```
-
-Sau khi đổi config nên restart bot.
-
----
-
-### `default_system_prompt`
-
-System prompt mặc định.
-
-Nó được dùng khi bài chỉ có `detect_pattern`, không có command phụ.
-
-Ví dụ:
-
-```text
-#bot
-Giải thích Dijkstra cho tôi.
-```
-
-Bot sẽ dùng:
-
-```json
-"default_system_prompt": "..."
-```
-
----
-
-### `commands`
-
-Các lệnh phụ để thay đổi system prompt.
-
-Ví dụ:
-
-```json
-"commands": {
-  "#short": {
-    "system_prompt": "Trả lời thật ngắn gọn."
   },
-  "#code": {
-    "system_prompt": "Ưu tiên trả lời theo hướng lập trình."
+  "attachments": {
+    "enabled": true,
+    "max_file_size_mb": 15,
+    "max_files_per_post": 3,
+    "max_extracted_chars_per_file": 20000,
+    "max_total_attachment_chars": 40000,
+    "delete_after_processing": true
   }
 }
 ```
 
-Ví dụ dùng:
+### Các option chính
+
+`lms_base_url`: URL gốc của LMS. Với IUH hiện dùng `https://lms.iuh.edu.vn`.
+
+`username`, `password`: thông tin đăng nhập LMS. Bot dùng để tự đăng nhập và tự đăng nhập lại khi session hết.
+
+`provider`: hiện code hỗ trợ `groq`.
+
+`groq_api_key`: API key Groq. Không commit key lên GitHub.
+
+`ai_model`: model Groq. Nếu để rỗng, bot mặc định dùng `openai/gpt-oss-120b`.
+
+`detect_pattern`: chuỗi kích hoạt chính, ví dụ `@bot`.
+
+`trigger_position` có 3 giá trị:
+
+- `title`: tìm mẫu kích hoạt trong tiêu đề.
+- `content`: tìm trong nội dung bài.
+- `both`: tìm cả hai.
+
+Nếu dùng `title`, phần nội dung sau mẫu kích hoạt trong tiêu đề sẽ được ghép với toàn bộ nội dung bài để làm prompt.
+
+`poll_interval_seconds`: số giây giữa hai lần quét Blog. Code ép tối thiểu 2 giây.
+
+`max_posts_per_scan`: số entry tối đa lấy trong mỗi vòng quét.
+
+`max_answer_length`: giới hạn số ký tự của câu trả lời trước khi comment.
+
+`retry_count`: số lần retry thêm khi gọi AI lỗi.
+
+`retry_delay_seconds`: thời gian chờ giữa các lần retry AI.
+
+`cooldown_seconds`: thời gian nghỉ thêm sau khi comment thành công.
+
+`debug`: bật log chi tiết như URL profile được phát hiện và lỗi retry AI.
+
+`headless`:
+
+- `true`: browser chạy ẩn.
+- `false`: hiện cửa sổ browser, phù hợp khi debug.
+
+`reconnect_delay_seconds`: thời gian chờ trước khi bot tạo lại phiên browser sau lỗi kết nối/browser.
+
+`login_retry_seconds`: thời gian chờ giữa các lần thử đăng nhập LMS.
+
+---
+
+## 4. Cơ chế đăng nhập và tự phục hồi
+
+Bot dùng `.browser_profile` làm persistent browser profile.
+
+Luồng hoạt động:
 
 ```text
-#bot
-#short
-Giải thích Dijkstra.
+Khởi động
+  ↓
+Mở Chrome → nếu lỗi thử Edge → nếu lỗi thử Chromium của Playwright
+  ↓
+Mở trang login LMS
+  ↓
+Có form username + password?
+  ├─ Không → session vẫn còn → dùng tiếp
+  └─ Có → tự điền config.json và đăng nhập
+  ↓
+Tự xác định userid
+  ↓
+Mở Blog và bắt đầu quét
 ```
 
-Bot sẽ dùng system prompt của `#short`.
+Điểm quan trọng: bot **không còn kết luận logout chỉ vì URL chứa `/login/`**. Moodle có thể mở `/login/index.php` ngay cả khi người dùng đã đăng nhập. Bot chỉ xem là logout khi form `username` và `password` thực sự xuất hiện.
 
-Ví dụ:
+Nếu trong lúc chạy:
 
-```text
-#bot
-#code
-Viết Dijkstra bằng C++.
-```
+- Session LMS hết → bot tự đăng nhập lại và tiếp tục quét.
+- Browser bị đóng/kết nối Playwright chết → bot tạo lại browser.
+- Mạng/LMS lỗi tạm thời → bot giữ host sống, chờ `reconnect_delay_seconds` rồi thử lại.
+- CAPTCHA/MFA xuất hiện hoặc giao diện LMS thay đổi lớn → có thể cần cập nhật code.
 
-Bot sẽ dùng system prompt của `#code`.
+---
 
-Nếu không có command phụ:
+## 5. Mẫu kích hoạt và lệnh phụ
 
-```text
-#bot
-Giải thích Dijkstra.
-```
-
-bot dùng `default_system_prompt`.
-
-Có thể tự thêm command mới:
+Ví dụ cấu hình:
 
 ```json
-"#math": {
-  "system_prompt": "Giải bài toán từng bước, ưu tiên công thức và lập luận toán học."
+"detect_pattern": "@bot",
+"trigger_position": "title"
+```
+
+Bạn có thể tạo tiêu đề:
+
+```text
+@bot #code
+```
+
+và nội dung bài:
+
+```text
+Viết Dijkstra bằng C++ và phân tích độ phức tạp.
+```
+
+Bot sẽ:
+
+1. Phát hiện `@bot`.
+2. Tìm lệnh phụ trong prompt.
+3. Xóa tag lệnh phụ khỏi prompt.
+4. Dùng `system_prompt` tương ứng.
+5. Gọi Groq.
+6. Comment câu trả lời lên bài.
+
+Các lệnh phụ **không hard-code**; bạn có thể thêm/sửa/xóa trong object `commands` của `config.json`.
+
+Nếu nhiều tag cùng xuất hiện, code hiện chọn một tag đầu tiên theo thứ tự ưu tiên nội bộ (tag dài hơn được xét trước). Nên dùng một lệnh phụ cho mỗi bài để hành vi rõ ràng.
+
+---
+
+## 6. Đọc file đính kèm
+
+Bật bằng:
+
+```json
+"attachments": {
+  "enabled": true,
+  "max_file_size_mb": 15,
+  "max_files_per_post": 3,
+  "max_extracted_chars_per_file": 20000,
+  "max_total_attachment_chars": 40000,
+  "delete_after_processing": true
 }
 ```
 
----
+Bot chỉ lấy link file thuộc chính host LMS và nằm trong đường dẫn Moodle `pluginfile.php` hoặc `draftfile.php`.
 
-### `trigger_position`
+Định dạng hỗ trợ:
 
-Quy định bot tìm `detect_pattern` ở đâu.
+- Tài liệu: `.pdf`, `.docx`.
+- Bảng dữ liệu: `.xlsx`, `.csv`.
+- Text/code: `.txt`, `.md`, `.py`, `.java`, `.c`, `.cpp`, `.h`, `.cs`, `.js`, `.ts`, `.tsx`, `.jsx`, `.html`, `.css`, `.json`, `.xml`, `.yaml`, `.yml`, `.sql`, `.sh`, `.bat`, `.ps1`, `.go`, `.rs`, `.php`, `.rb`, `.kt`, `.swift` và một số extension text tương tự.
 
-Có 3 giá trị:
+Cách đọc:
+
+- PDF: trích text theo từng trang.
+- DOCX: đọc paragraph và bảng.
+- XLSX: đọc giá trị của từng sheet.
+- CSV: đọc theo hàng.
+- Text/code: đọc trực tiếp với fallback encoding.
+
+File được tải tạm vào:
 
 ```text
-content
-title
-both
+.attachments/<entry_id>/
 ```
 
-Ví dụ:
+Sau khi xử lý, nếu `delete_after_processing=true`, thư mục tạm của entry sẽ được xóa.
 
-```json
-"trigger_position": "content"
-```
+Giới hạn:
 
-Ý nghĩa:
+- Không OCR PDF scan/ảnh.
+- Không phân tích ảnh đính kèm.
+- Chưa hỗ trợ PPT/PPTX.
+- File vượt `max_file_size_mb` sẽ bị bỏ qua.
+- Tổng text file đưa vào AI bị giới hạn bởi `max_total_attachment_chars`.
 
-- `content`: chỉ tìm trong nội dung bài.
-- `title`: chỉ tìm trong tiêu đề.
-- `both`: tìm cả tiêu đề và nội dung.
-
-Khuyến nghị:
-
-```json
-"trigger_position": "content"
-```
+Nếu tải file trả về HTML thay vì file thật, bot xem đó là dấu hiệu session có thể đã hết và kích hoạt quy trình đăng nhập lại.
 
 ---
 
-### `poll_interval_seconds`
+## 7. Chống xử lý trùng
 
-Khoảng thời gian giữa hai lần bot kiểm tra LMS.
+Bot có hai lớp bảo vệ:
 
-Ví dụ:
+### `processed.json`
 
-```json
-"poll_interval_seconds": 5
-```
+Lưu `entryid` của các bài đã comment thành công. Khi quét lại, các entry này được bỏ qua.
 
-Nghĩa là cứ 5 giây bot kiểm tra lại một lần.
-
-Bot hiện giới hạn tối thiểu khoảng 2 giây.
-
-Không nên đặt quá thấp để tránh gửi request quá dày đến LMS.
-
----
-
-### `max_posts_per_scan`
-
-Số bài tối đa bot kiểm tra trong mỗi vòng quét.
-
-```json
-"max_posts_per_scan": 10
-```
-
-Thông thường để 10 là đủ.
-
----
-
-### `max_answer_length`
-
-Giới hạn số ký tự tối đa của câu trả lời AI trước khi comment.
-
-```json
-"max_answer_length": 6000
-```
-
-Ví dụ muốn câu trả lời ngắn hơn:
-
-```json
-"max_answer_length": 2000
-```
-
----
-
-### `retry_count`
-
-Số lần thử lại khi gọi AI bị lỗi.
-
-```json
-"retry_count": 2
-```
-
-Ví dụ request đầu tiên lỗi, bot có thể thử thêm 2 lần.
-
----
-
-### `retry_delay_seconds`
-
-Thời gian chờ giữa các lần retry API.
-
-```json
-"retry_delay_seconds": 2
-```
-
-Nghĩa là chờ 2 giây trước khi thử lại.
-
----
-
-### `cooldown_seconds`
-
-Thời gian nghỉ thêm sau khi bot vừa trả lời thành công một bài.
-
-```json
-"cooldown_seconds": 0
-```
-
-Nếu đặt:
-
-```json
-"cooldown_seconds": 3
-```
-
-bot sẽ nghỉ thêm 3 giây sau mỗi comment thành công.
-
----
-
-### `only_new_posts`
-
-Quy định bot có bỏ qua các bài đã tồn tại trước lúc bot khởi động hay không.
-
-```json
-"only_new_posts": false
-```
-
-- `false`: bot vẫn có thể xử lý bài cũ nếu chưa có trong `processed.json`.
-- `true`: khi vừa bật bot, các bài hiện có sẽ được đánh dấu bỏ qua; bot chỉ xử lý bài xuất hiện sau đó.
-
-Khi test nên để:
-
-```json
-"only_new_posts": false
-```
-
----
-
-### `debug`
-
-Bật log chi tiết.
-
-```json
-"debug": false
-```
-
-Khi cần tìm lỗi:
-
-```json
-"debug": true
-```
-
-Sau khi bot chạy ổn định có thể để lại `false`.
-
----
-
-### `headless`
-
-Quy định có hiện cửa sổ Chrome/Edge hay không.
-
-```json
-"headless": false
-```
-
-- `false`: hiện trình duyệt.
-- `true`: chạy trình duyệt ẩn.
-
-Trong giai đoạn test nên dùng:
-
-```json
-"headless": false
-```
-
-Khi bot đã ổn định có thể thử `true`.
-
----
-
-## 4. Bot xác định blog của ai?
-
-Không cần cấu hình `userid` thủ công.
-
-Sau khi đăng nhập, bot tìm URL Profile của tài khoản đang đăng nhập, lấy:
-
-```text
-?id=XXXX
-```
-
-sau đó tự tạo URL blog:
-
-```text
-https://lms.iuh.edu.vn/blog/index.php?userid=XXXX
-```
-
-Vì vậy nếu đổi tài khoản LMS trong `config.json`, bot sẽ tự theo blog của tài khoản mới.
-
----
-
-## 5. processed.json
-
-File:
-
-```text
-processed.json
-```
-
-lưu ID các bài đã được bot xử lý thành công.
-
-Mục đích là tránh bot comment lặp lại cùng một bài.
-
-Nếu muốn test lại một bài cũ, có thể chạy:
+Muốn test lại bài cũ:
 
 ```text
 RESET_PROCESSED.bat
 ```
 
-Sau đó restart bot.
+File này sẽ xóa `processed.json`.
+
+### `in_progress`
+
+Trong một phiên chạy, entry đang xử lý được giữ trong bộ nhớ để không bị chạy đồng thời/lặp do vòng quét.
+
+### Single instance trên Windows
+
+Bot tạo mutex dựa trên:
+
+```text
+lms_base_url + username
+```
+
+Nếu mở bot lần thứ hai với cùng tài khoản, instance mới sẽ tự dừng thay vì cùng comment vào một bài.
 
 ---
 
-## 6. Ví dụ sử dụng
+## 8. `only_new_posts`
 
-### Trả lời mặc định
+Nếu:
 
-Bài đăng:
-
-```text
-#bot
-Dijkstra hoạt động như thế nào?
+```json
+"only_new_posts": true
 ```
 
-Bot:
+khi khởi động, bot lấy tối đa `max_posts_per_scan` bài đang có và đánh dấu chúng là đã biết. Sau đó chỉ bài mới xuất hiện mới được xử lý.
 
-1. Phát hiện `#bot`.
-2. Lấy phần sau `#bot` làm câu hỏi.
-3. Dùng `default_system_prompt`.
-4. Gọi Groq.
-5. Comment câu trả lời.
+Mốc baseline này chỉ được tạo **một lần trong mỗi lần chạy bot**. Nếu mất mạng rồi reconnect, bot không tạo lại baseline nên không vô tình bỏ qua bài vừa xuất hiện.
 
-### Trả lời ngắn
+Nếu muốn bot có thể xử lý bài cũ chưa có trong `processed.json`:
 
-```text
-#bot
-#short
-Dijkstra là gì?
+```json
+"only_new_posts": false
 ```
-
-Bot dùng system prompt của `#short`.
-
-### Trả lời code
-
-```text
-#bot
-#code
-Viết Dijkstra bằng C++.
-```
-
-Bot dùng system prompt của `#code`.
 
 ---
 
-## 7. Log khi chạy
+## 9. AI / Groq
 
-Khi khởi động, bot sẽ hiện tương tự:
+Hiện provider được hỗ trợ trong code là:
+
+```json
+"provider": "groq"
+```
+
+Nếu `ai_model` để trống, model mặc định là:
+
+```text
+openai/gpt-oss-120b
+```
+
+Bot gọi Groq với:
+
+- `temperature=0.3`.
+- `reasoning_effort="low"`.
+- `include_reasoning=false`.
+- Timeout SDK khoảng 90 giây.
+- Số completion token được suy ra từ `max_answer_length` và giới hạn tối đa 4096.
+- Câu trả lời cuối cùng bị cắt theo `max_answer_length`.
+
+Groq:
+
+- Console: https://console.groq.com/
+- API Keys: https://console.groq.com/keys
+- Docs: https://console.groq.com/docs/
+
+---
+
+## 10. Bot xác định Blog của ai?
+
+Sau khi đăng nhập, bot tìm link profile dạng:
+
+```text
+/user/profile.php?id=XXXX
+```
+
+rồi lấy `XXXX` để tạo:
+
+```text
+https://lms.iuh.edu.vn/blog/index.php?userid=XXXX
+```
+
+Do đó không cần cấu hình `userid`. Nếu đổi tài khoản trong `config.json`, bot sẽ theo Blog của tài khoản mới.
+
+---
+
+## 11. Log khi chạy
+
+Log bình thường có dạng:
 
 ```text
 === IUH LMS BLOG BOT ===
-Mau kich hoat: '#bot'; scan moi 5s
-Lenh phu: #short, #code
+Mau kich hoat: '@bot'; scan moi 6s
+Lenh phu: #short, #code, #nocmt
 AI provider: groq; model: openai/gpt-oss-120b
+Tu dong reconnect sau 5s neu mat ket noi.
+File dinh kem: ON | toi da 3 file/bai | 15 MB/file
+Mo trinh duyet chrome...
+Da co phien dang nhap LMS.
+Da xac dinh blog cua tai khoan dang nhap.
 ```
 
-Nếu thấy:
+Khi phát hiện bài:
 
 ```text
-Phat hien '#bot' o entry ...
+Phat hien '@bot' o entry ...; mode=#code. Dang goi AI...
+Entry ...: AI tra loi ... ky tu. Dang gui binh luan...
+Entry ...: Da gui binh luan.
 ```
 
-nghĩa là bot đã nhận được mẫu kích hoạt.
+Khi session hết:
+
+```text
+Phien LMS da het/bi vang. Dang tu dong dang nhap lai...
+Dang nhap lai thanh cong. Tiep tuc quet.
+```
+
+Khi browser/mạng lỗi:
+
+```text
+Can khoi tao lai phien browser.
+Host van dang chay. Cho 5s roi ket noi lai...
+```
 
 ---
 
-## 8. Khuyến nghị khi đăng câu hỏi trên LMS
-
-Khi dùng bot để hỏi AI thông qua Blog trên LMS, nên để bài viết ở trạng thái **bản nháp / không công khai** nếu LMS cho phép.
-
-Mục đích:
-
-- Hạn chế người khác nhìn thấy câu hỏi đang dùng để gọi bot.
-- Tránh làm Blog cá nhân bị đầy các bài test hoặc câu hỏi kỹ thuật.
-- Giảm nguy cơ vô tình công khai nội dung riêng tư, bài tập hoặc dữ liệu chưa muốn chia sẻ.
-- Vẫn có thể để bot đọc bài của chính tài khoản đang đăng nhập nếu trạng thái nháp của LMS cho phép tài khoản chủ bài truy cập bình thường.
-
-Quy trình khuyến nghị:
+## 12. Cấu trúc project
 
 ```text
-Tạo bài Blog
-    ↓
-Đặt ở chế độ Nháp / Không công khai
-    ↓
-Thêm detect_pattern, ví dụ: #bot
-    ↓
-Nhập câu hỏi
-    ↓
-Lưu bài
-    ↓
-Bot phát hiện và trả lời bằng comment
+lms_bot/
+├─ lms_blog_bot.py       # Logic chính
+├─ START_BOT.bat         # Launcher, tạo venv + dependency
+├─ RUN_BOT_JOB.ps1       # Windows Job Object, quản lý process con
+├─ RESET_PROCESSED.bat   # Xóa trạng thái bài đã xử lý
+├─ config.json           # Secret/local config, không commit
+├─ processed.json        # Runtime state, không commit
+├─ .browser_profile/     # Cookie/session browser, không commit
+├─ .attachments/         # File LMS tải tạm, không commit
+├─ .venv/                # Python virtual environment
+└─ README.md
 ```
-
-> Không nên đăng công khai chỉ để gọi bot nếu nội dung câu hỏi không cần chia sẻ với người khác. Nếu LMS thay đổi cách xử lý bài nháp hoặc không cho comment ở bài nháp, hãy kiểm tra lại bằng một bài test trước.
 
 ---
 
-## 9. Lưu ý bảo mật
+## 13. Lưu ý bảo mật
 
-`config.json` hiện chứa:
+`config.json` chứa:
 
 - tài khoản LMS;
 - mật khẩu LMS;
 - Groq API key.
 
-Không:
+Không commit, upload hoặc gửi công khai file này.
 
-- upload `config.json` lên GitHub công khai;
-- gửi file cho người khác;
-- chụp màn hình phần API key/mật khẩu rồi đăng công khai.
+Repository hiện đã ignore:
 
-Nếu sau này đưa project lên Git, nên thêm `config.json` vào `.gitignore`.
+```text
+config.json
+auth.json
+.env
+.env.*
+processed.json
+.browser_profile/
+.attachments/
+.venv/
+```
+
+Nếu API key từng bị lộ ở nơi công khai, hãy revoke key cũ và tạo key mới.
+
+---
+
+## 14. Giới hạn hiện tại
+
+- Chỉ có provider Groq.
+- Selector phụ thuộc giao diện Moodle/LMS IUH hiện tại; LMS đổi UI có thể cần cập nhật.
+- CAPTCHA/MFA không được tự vượt qua.
+- Chưa xử lý ảnh và OCR.
+- Chưa đọc PPT/PPTX.
+- Bot comment qua UI của LMS; nếu chức năng comment bị tắt hoặc selector đổi, bot sẽ báo không tìm thấy ô/nút comment.
+- `processed.json` chỉ ghi bài sau khi comment thành công; nếu AI hoặc comment lỗi, bài có thể được thử lại ở vòng quét sau.
+
+---
+
+## 15. Quy trình sử dụng gợi ý
+
+1. Chạy `START_BOT.bat`.
+2. Chờ log báo đã xác định Blog.
+3. Tạo bài Blog theo `trigger_position`.
+4. Thêm `@bot` và lệnh phụ nếu cần.
+5. Đính kèm file nếu muốn AI đọc file.
+6. Lưu bài.
+7. Bot phát hiện → gọi AI → đăng comment.
+8. Đóng cửa sổ launcher khi muốn dừng toàn bộ bot.
