@@ -4,7 +4,7 @@ from datetime import datetime
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
-from health_monitor import write_health, cleanup_old_attachments, get_process_memory_mb, should_restart_browser
+from health_monitor import write_health, cleanup_old_attachments, get_process_memory_mb, should_restart_browser, find_browser_memory_mb
 
 ROOT = Path(__file__).resolve().parent
 CONFIG_PATH = ROOT / "config.json"
@@ -915,7 +915,7 @@ def main():
                 blog_url = f"{base_url}/blog/index.php?userid={user_id}"
                 processed = load_processed(account_key)
                 log("Da xac dinh blog cua dung tai khoan config.")
-                write_health("running", account=account_key, memory_mb=get_process_memory_mb())
+                write_health("running", account=account_key, memory_mb=get_process_memory_mb(), browser_children_mb=find_browser_memory_mb(os.getpid()))
 
                 if account_key not in initialized_accounts:
                     if only_new and not processed:
@@ -956,9 +956,9 @@ def main():
                                 in_progress.discard(eid)
 
                         removed = cleanup_old_attachments(ATTACHMENT_DIR, 24)
-                        write_health("running", account=account_key, memory_mb=get_process_memory_mb(), removed_files=removed)
-                        if should_restart_browser(800):
-                            log("Phat hien RAM Python cao. Khoi tao lai browser de don bo nho.")
+                        write_health("running", account=account_key, memory_mb=get_process_memory_mb(), browser_children_mb=find_browser_memory_mb(os.getpid()), removed_files=removed)
+                        if should_restart_browser(800) or (find_browser_memory_mb(os.getpid()) or 0) > 1500:
+                            log("Phat hien bo nho Python/Chrome bot cao. Khoi tao lai browser de don bo nho.")
                             raise RuntimeError("browser_restart_required")
                         time.sleep(interval)
 
