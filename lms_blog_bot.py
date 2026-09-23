@@ -13,6 +13,8 @@ SESSION_USER_PATH = ROOT / "session_username.txt"
 IDENTITY_PATH = ROOT / "account_identities.json"
 PROFILE_DIR = ROOT / ".browser_profile"
 ATTACHMENT_DIR = ROOT / ".attachments"
+LOG_DIR = ROOT / "logs"
+LOG_FILE = LOG_DIR / "bot.log"
 
 TEXT_EXTENSIONS = {
     ".txt", ".md", ".markdown", ".py", ".java", ".c", ".cc", ".cpp", ".cxx",
@@ -23,7 +25,17 @@ TEXT_EXTENSIONS = {
 SUPPORTED_ATTACHMENT_EXTENSIONS = TEXT_EXTENSIONS | {".pdf", ".docx", ".xlsx", ".csv"}
 
 def log(msg):
-    print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}", flush=True)
+    line = f"[{datetime.now().strftime('%H:%M:%S')}] {msg}"
+    print(line, flush=True)
+    try:
+        LOG_DIR.mkdir(exist_ok=True)
+        if LOG_FILE.exists() and LOG_FILE.stat().st_size > 10 * 1024 * 1024:
+            backup = LOG_DIR / f"bot-{datetime.now().strftime('%Y%m%d-%H%M%S')}.log"
+            LOG_FILE.replace(backup)
+        with LOG_FILE.open("a", encoding="utf-8") as f:
+            f.write(line + "\n")
+    except Exception:
+        pass
 
 def load_config():
     return json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
