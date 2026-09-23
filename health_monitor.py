@@ -53,6 +53,27 @@ def get_process_memory_mb(pid=None):
         return None
 
 
+def get_children_memory_mb(pid):
+    """Tong RAM process con (dung cho Playwright/Chrome watchdog)."""
+    try:
+        import psutil
+        root = psutil.Process(pid)
+        total = 0
+        for child in root.children(recursive=True):
+            try:
+                total += child.memory_info().rss
+            except Exception:
+                continue
+        return round(total / 1024 / 1024, 2)
+    except Exception:
+        return None
+
+
 def should_restart_browser(max_python_mb=800):
     memory = get_process_memory_mb()
     return memory is not None and memory > max_python_mb
+
+
+def should_restart_browser_tree(browser_pid, max_children_mb=1500):
+    memory = get_children_memory_mb(browser_pid)
+    return memory is not None and memory > max_children_mb

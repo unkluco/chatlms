@@ -133,7 +133,13 @@ def save_processed(items, account_key="default"):
         except Exception:
             pass
     data.setdefault("accounts", {})[account_key] = sorted(map(str, items))
-    STATE_PATH.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    # Ghi atomic: tranh hong processed.json neu may mat dien/crash dung luc ghi.
+    tmp_path = STATE_PATH.with_suffix(".json.tmp")
+    tmp_path.write_text(
+        json.dumps(data, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    tmp_path.replace(STATE_PATH)
 
 def entry_id(url):
     try:
