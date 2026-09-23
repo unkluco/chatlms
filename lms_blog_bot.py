@@ -1,14 +1,23 @@
 from __future__ import annotations
-import json, sys, time
+import csv, ctypes, hashlib, json, os, re, shutil, sys, time
 from datetime import datetime
 from pathlib import Path
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
 
 ROOT = Path(__file__).resolve().parent
 CONFIG_PATH = ROOT / "config.json"
 STATE_PATH = ROOT / "processed.json"
 PROFILE_DIR = ROOT / ".browser_profile"
+ATTACHMENT_DIR = ROOT / ".attachments"
+
+TEXT_EXTENSIONS = {
+    ".txt", ".md", ".markdown", ".py", ".java", ".c", ".cc", ".cpp", ".cxx",
+    ".h", ".hpp", ".cs", ".js", ".ts", ".tsx", ".jsx", ".html", ".htm", ".css",
+    ".json", ".xml", ".yaml", ".yml", ".ini", ".cfg", ".conf", ".log", ".sql",
+    ".sh", ".bat", ".ps1", ".go", ".rs", ".php", ".rb", ".kt", ".kts", ".swift"
+}
+SUPPORTED_ATTACHMENT_EXTENSIONS = TEXT_EXTENSIONS | {".pdf", ".docx", ".xlsx", ".csv"}
 
 def log(msg):
     print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}", flush=True)
@@ -19,6 +28,44 @@ def load_config():
 def debug_log(cfg, msg):
     if bool(cfg.get("debug", False)):
         log("[DEBUG] " + msg)
+
+def acquire_single_instance(cfg):
+    if os.name != "nt":
+        return None
+
+    identity = (
+        str(cfg.get("lms_base_url", "")).strip().lower()
+        + "|"
+        + str(cfg.get("username", "")).strip().lower()
+    )
+    suffix = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:16]
+    mutex_name = "Local\\IUH_LMS_BLOG_BOT_" + suffix
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateMutexW.argtypes = [ctypes.c_void_p, ctypes.c_bool, ctypes.c_wchar_p]
+    kernel32.CreateMutexW.restype = ctypes.c_void_p
+    kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+    kernel32.CloseHandle.restype = ctypes.c_bool
+
+    handle = kernel32.CreateMutexW(None, False, mutex_name)
+    if not handle:
+        raise RuntimeError("Khong tao duoc single-instance mutex.")
+
+    ERROR_ALREADY_EXISTS = 183
+    if ctypes.get_last_error() == ERROR_ALREADY_EXISTS:
+        kernel32.CloseHandle(handle)
+        return False
+
+    return kernel32, handle
+
+def release_single_instance(lock):
+    if not lock or lock is False:
+        return
+    try:
+        kernel32, handle = lock
+        kernel32.CloseHandle(handle)
+    except Exception:
+        pass
 
 def load_processed():
     if not STATE_PATH.exists():
@@ -54,43 +101,92 @@ def launch_browser(pw, headless=False):
         ignore_https_errors=True, viewport={"width": 1400, "height": 900})
 
 def logged_out(page):
-    return "/login/" in page.url.lower() or page.locator('input[name="username"]').count() > 0
+    # Khong dua vao URL /login/: Moodle van cho phep nguoi da dang nhap
+    # mo /login/index.php va hien trang "ban da dang nhap" ma khong co form.
+    # Chi xem la da logout khi form dang nhap thuc su xuat hien.
+    return (
+        page.locator('input[name="username"]').count() > 0
+        and page.locator('input[name="password"]').count() > 0
+    )
+
+def browser_needs_restart(page, exc=None):
+    try:
+        if page.is_closed():
+            return True
+    except Exception:
+        return True
+
+    message = str(exc or "").lower()
+    dead_markers = (
+        "target page, context or browser has been closed",
+        "browser has been closed",
+        "context has been closed",
+        "page has been closed",
+        "connection closed",
+    )
+    return any(marker in message for marker in dead_markers)
 
 def ensure_login(page, cfg):
     base_url = str(cfg.get("lms_base_url", "https://lms.iuh.edu.vn")).rstrip("/")
     login_url = base_url + "/login/index.php"
-    page.goto(login_url, wait_until="domcontentloaded", timeout=45000)
-
-    if not logged_out(page):
-        log("Da co phien dang nhap LMS.")
-        return
-
+    retry_seconds = max(2, int(cfg.get("login_retry_seconds", 5)))
     username = str(cfg.get("username", "")).strip()
     password = str(cfg.get("password", ""))
-    if username and password:
-        log("Dang tu dong dang nhap LMS bang config.json...")
-        try:
-            page.locator('input[name="username"]').fill(username)
-            page.locator('input[name="password"]').fill(password)
-            page.locator('#loginbtn, button[type="submit"], input[type="submit"]').first.click(timeout=10000)
-            page.wait_for_load_state("domcontentloaded", timeout=30000)
-            page.wait_for_timeout(1000)
-            if not logged_out(page):
-                log("Tu dong dang nhap thanh cong.")
-                return
-            log("Tu dong dang nhap chua thanh cong. Co the LMS dang yeu cau CAPTCHA/MFA.")
-        except Exception as exc:
-            log(f"Tu dong dang nhap gap loi: {type(exc).__name__}")
 
-    log("Dang cho dang nhap thu cong trong cua so trinh duyet...")
+    first_try = True
+
     while True:
-        time.sleep(2)
         try:
+            # Luon mo trang login. Neu session con song, Moodle hien thong bao
+            # "ban da dang nhap" (khong co form); neu het session, form login se xuat hien.
+            page.goto(login_url, wait_until="domcontentloaded", timeout=45000)
+
             if not logged_out(page):
-                log("Dang nhap thanh cong.")
+                if first_try:
+                    log("Da co phien dang nhap LMS.")
+                else:
+                    log("Phien LMS da san sang lai.")
                 return
-        except Exception:
-            pass
+
+            if username and password:
+                log("Dang tu dong dang nhap LMS bang config.json...")
+                page.locator('input[name="username"]').fill(username, timeout=10000)
+                page.locator('input[name="password"]').fill(password, timeout=10000)
+                page.locator(
+                    '#loginbtn, button[type="submit"], input[type="submit"]'
+                ).first.click(timeout=10000)
+
+                try:
+                    page.wait_for_load_state("domcontentloaded", timeout=30000)
+                except Exception:
+                    pass
+
+                page.wait_for_timeout(1000)
+
+                if not logged_out(page):
+                    log("Tu dong dang nhap thanh cong.")
+                    return
+
+                log(
+                    "Chua dang nhap duoc. Co the LMS dang yeu cau CAPTCHA/MFA "
+                    "hoac thong tin dang nhap chua dung."
+                )
+            else:
+                log("Thieu username/password trong config.json.")
+
+        except KeyboardInterrupt:
+            raise
+        except Exception as exc:
+            if browser_needs_restart(page, exc):
+                raise RuntimeError("browser_restart_required") from exc
+            log(
+                f"Khong ket noi/dang nhap duoc LMS: "
+                f"{type(exc).__name__}: {exc}"
+            )
+
+        first_try = False
+        log(f"Cho {retry_seconds}s roi thu dang nhap lai...")
+        time.sleep(retry_seconds)
 
 def discover_user_id(page, cfg):
     base_url = str(cfg.get("lms_base_url", "https://lms.iuh.edu.vn")).rstrip("/")
@@ -169,6 +265,60 @@ def extract_entry_texts(page):
     ])
     return title, content
 
+def _safe_filename(url, fallback="attachment"):
+    name = Path(unquote(urlparse(url).path)).name or fallback
+    name = re.sub(r'[<>:"/\\|?*]', "_", name).strip(" .")
+    return name or fallback
+
+def _attachment_ext(url):
+    return Path(unquote(urlparse(url).path)).suffix.lower()
+
+def extract_attachment_links(page, cfg):
+    settings = cfg.get("attachments", {})
+    if not isinstance(settings, dict) or not settings.get("enabled", False):
+        return []
+
+    max_files = max(1, int(settings.get("max_files_per_post", 3)))
+    base_host = urlparse(str(cfg.get("lms_base_url", ""))).netloc.lower()
+    selectors = [
+        '.blog_entry a[href]',
+        '.blog-entry a[href]',
+        '[data-region="blog-post"] a[href]',
+        'article a[href]',
+        '#region-main a[href*="/pluginfile.php/"]',
+        '#region-main a[href*="/draftfile.php/"]',
+    ]
+
+    found = []
+    seen = set()
+    for selector in selectors:
+        try:
+            links = page.locator(selector)
+            for i in range(min(links.count(), 100)):
+                href = links.nth(i).evaluate("e => e.href") or ""
+                if not href or href in seen:
+                    continue
+                parsed = urlparse(href)
+                if parsed.netloc and base_host and parsed.netloc.lower() != base_host:
+                    continue
+                if "/pluginfile.php/" not in parsed.path and "/draftfile.php/" not in parsed.path:
+                    continue
+                ext = _attachment_ext(href)
+                if ext not in SUPPORTED_ATTACHMENT_EXTENSIONS:
+                    continue
+                seen.add(href)
+                text = (links.nth(i).inner_text(timeout=1000) or "").strip()
+                found.append({
+                    "url": href,
+                    "name": text or _safe_filename(href),
+                    "ext": ext,
+                })
+                if len(found) >= max_files:
+                    return found
+        except Exception:
+            pass
+    return found
+
 def match_command(page, cfg):
     title, content = extract_entry_texts(page)
 
@@ -221,6 +371,218 @@ def match_command(page, cfg):
         return detect_pattern, selected_command, selected_system_prompt, prompt
 
     return None
+
+def download_attachment(page, eid, item, cfg):
+    settings = cfg.get("attachments", {}) or {}
+    max_size = max(1, int(settings.get("max_file_size_mb", 15))) * 1024 * 1024
+
+    try:
+        response = page.context.request.get(item["url"], timeout=45000)
+    except Exception as exc:
+        return None, f"download loi: {type(exc).__name__}: {exc}"
+
+    if not response.ok:
+        return None, f"HTTP {response.status}"
+
+    headers = response.headers or {}
+    content_type = str(headers.get("content-type", "")).lower()
+    if "text/html" in content_type and item.get("ext") not in (".html", ".htm"):
+        raise RuntimeError("login_required")
+
+    try:
+        content_length = int(headers.get("content-length", "0") or 0)
+    except Exception:
+        content_length = 0
+
+    if content_length and content_length > max_size:
+        return None, f"file vuot gioi han {settings.get('max_file_size_mb', 15)} MB"
+
+    body = response.body()
+    if len(body) > max_size:
+        return None, f"file vuot gioi han {settings.get('max_file_size_mb', 15)} MB"
+
+    entry_dir = ATTACHMENT_DIR / str(eid)
+    entry_dir.mkdir(parents=True, exist_ok=True)
+
+    filename = _safe_filename(item["url"], item.get("name") or "attachment")
+    path = entry_dir / filename
+
+    if path.exists():
+        stem, suffix = path.stem, path.suffix
+        n = 2
+        while path.exists():
+            path = entry_dir / f"{stem}_{n}{suffix}"
+            n += 1
+
+    path.write_bytes(body)
+    return path, None
+
+def _decode_text_file(path):
+    raw = path.read_bytes()
+    for encoding in ("utf-8-sig", "utf-16", "utf-8", "cp1252"):
+        try:
+            return raw.decode(encoding)
+        except UnicodeDecodeError:
+            pass
+    return raw.decode("utf-8", errors="replace")
+
+def _extract_pdf(path):
+    from pypdf import PdfReader
+
+    reader = PdfReader(str(path))
+    parts = []
+    for index, page in enumerate(reader.pages, start=1):
+        text = (page.extract_text() or "").strip()
+        if text:
+            parts.append(f"[Trang {index}]\n{text}")
+    return "\n\n".join(parts)
+
+def _extract_docx(path):
+    from docx import Document
+
+    doc = Document(str(path))
+    parts = []
+
+    for paragraph in doc.paragraphs:
+        text = paragraph.text.strip()
+        if text:
+            parts.append(text)
+
+    for table_index, table in enumerate(doc.tables, start=1):
+        rows = []
+        for row in table.rows:
+            values = [cell.text.strip() for cell in row.cells]
+            if any(values):
+                rows.append(" | ".join(values))
+        if rows:
+            parts.append(f"[Bang {table_index}]\n" + "\n".join(rows))
+
+    return "\n\n".join(parts)
+
+def _extract_xlsx(path, max_chars):
+    from openpyxl import load_workbook
+
+    wb = load_workbook(str(path), read_only=True, data_only=True)
+    parts = []
+    total = 0
+
+    try:
+        for ws in wb.worksheets:
+            header = f"[Sheet: {ws.title}]"
+            parts.append(header)
+            total += len(header) + 1
+
+            for row in ws.iter_rows(values_only=True):
+                values = ["" if value is None else str(value) for value in row]
+                if not any(values):
+                    continue
+                line = " | ".join(values)
+                parts.append(line)
+                total += len(line) + 1
+                if total >= max_chars:
+                    parts.append("[Da cat bot vi vuot gioi han trich xuat]")
+                    return "\n".join(parts)
+    finally:
+        wb.close()
+
+    return "\n".join(parts)
+
+def _extract_csv(path, max_chars):
+    text = _decode_text_file(path)
+    rows = []
+    total = 0
+
+    try:
+        reader = csv.reader(text.splitlines())
+        for row in reader:
+            line = " | ".join(str(value) for value in row)
+            rows.append(line)
+            total += len(line) + 1
+            if total >= max_chars:
+                rows.append("[Da cat bot vi vuot gioi han trich xuat]")
+                break
+        return "\n".join(rows)
+    except Exception:
+        return text[:max_chars]
+
+def extract_attachment_text(path, cfg):
+    settings = cfg.get("attachments", {}) or {}
+    max_chars = max(1000, int(settings.get("max_extracted_chars_per_file", 20000)))
+    ext = path.suffix.lower()
+
+    if ext in TEXT_EXTENSIONS:
+        text = _decode_text_file(path)
+    elif ext == ".pdf":
+        text = _extract_pdf(path)
+        if not text.strip():
+            return "", "PDF khong co text trich xuat duoc; OCR/anh chua duoc ho tro"
+    elif ext == ".docx":
+        text = _extract_docx(path)
+    elif ext == ".xlsx":
+        text = _extract_xlsx(path, max_chars)
+    elif ext == ".csv":
+        text = _extract_csv(path, max_chars)
+    else:
+        return "", f"chua ho tro dinh dang {ext}"
+
+    text = text.strip()
+    if len(text) > max_chars:
+        text = text[:max_chars] + "\n[Da cat bot vi vuot gioi han trich xuat]"
+    return text, None
+
+def collect_attachment_context(page, eid, cfg):
+    settings = cfg.get("attachments", {}) or {}
+    if not settings.get("enabled", False):
+        return ""
+
+    links = extract_attachment_links(page, cfg)
+    if not links:
+        return ""
+
+    max_total = max(1000, int(settings.get("max_total_attachment_chars", 40000)))
+    delete_after = bool(settings.get("delete_after_processing", True))
+    entry_dir = ATTACHMENT_DIR / str(eid)
+
+    sections = []
+    used_chars = 0
+
+    try:
+        log(f"Entry {eid}: tim thay {len(links)} file dinh kem ho tro.")
+        for item in links:
+            path, error = download_attachment(page, eid, item, cfg)
+            if error:
+                log(f"Entry {eid}: bo qua {item.get('name')}: {error}")
+                continue
+
+            try:
+                text, error = extract_attachment_text(path, cfg)
+            except Exception as exc:
+                log(f"Entry {eid}: loi doc {path.name}: {type(exc).__name__}: {exc}")
+                continue
+
+            if error:
+                log(f"Entry {eid}: bo qua {path.name}: {error}")
+                continue
+            if not text:
+                continue
+
+            remaining = max_total - used_chars
+            if remaining <= 0:
+                break
+            text = text[:remaining]
+            section = f"===== FILE: {path.name} =====\n{text}"
+            sections.append(section)
+            used_chars += len(text)
+
+            log(f"Entry {eid}: da doc {path.name} ({len(text)} ky tu).")
+            if used_chars >= max_total:
+                log(f"Entry {eid}: da dat gioi han tong noi dung file {max_total} ky tu.")
+                break
+    finally:
+        if delete_after and entry_dir.exists():
+            shutil.rmtree(entry_dir, ignore_errors=True)
+
+    return "\n\n".join(sections)
 
 def call_groq(prompt, system_prompt, cfg):
     api_key = str(cfg.get("groq_api_key", "")).strip()
@@ -309,6 +671,14 @@ def process_entry(page, eid, url, cfg):
         log(f"Entry {eid}: co mau kich hoat {detect_pattern!r} nhung khong co noi dung cau hoi.")
         return False
 
+    attachment_context = collect_attachment_context(page, eid, cfg)
+    if attachment_context:
+        prompt = (
+            prompt
+            + "\n\n===== NOI DUNG FILE DINH KEM =====\n"
+            + attachment_context
+        )
+
     mode = command_tag if command_tag else "default"
     log(f"Phat hien {detect_pattern!r} o entry {eid}; mode={mode}. Dang goi AI...")
     answer = call_ai(prompt, system_prompt, cfg)
@@ -320,65 +690,142 @@ def process_entry(page, eid, url, cfg):
 
 def main():
     cfg = load_config()
+
+    instance_lock = acquire_single_instance(cfg)
+    if instance_lock is False:
+        log("Bot cho tai khoan LMS nay dang chay o mot process khac.")
+        log("Khong khoi dong instance thu hai de tranh binh luan trung.")
+        return 2
+
     processed = load_processed()
+    in_progress = set()
+
     base_url = str(cfg["lms_base_url"]).rstrip("/")
     commands = cfg.get("commands", {})
     only_new = bool(cfg.get("only_new_posts", False))
     interval = max(2, int(cfg.get("poll_interval_seconds", 5)))
     limit = max(1, int(cfg.get("max_posts_per_scan", 10)))
     cooldown = max(0.0, float(cfg.get("cooldown_seconds", 0)))
+    reconnect_delay = max(2, int(cfg.get("reconnect_delay_seconds", 5)))
     provider = str(cfg.get("provider", "groq") or "groq")
     model = str(cfg.get("ai_model", "")).strip() or "openai/gpt-oss-120b"
+
     log("=== IUH LMS BLOG BOT ===")
     names = ", ".join(commands.keys()) if isinstance(commands, dict) else "(none)"
     detect_pattern = str(cfg.get("detect_pattern", "#bot"))
     log(f"Mau kich hoat: {detect_pattern!r}; scan moi {interval}s")
     log(f"Lenh phu: {names}")
     log(f"AI provider: {provider}; model: {model}")
+    log(f"Tu dong reconnect sau {reconnect_delay}s neu mat ket noi.")
+
+    attachment_cfg = cfg.get("attachments", {}) or {}
+    if attachment_cfg.get("enabled", False):
+        log(
+            "File dinh kem: ON | "
+            f"toi da {attachment_cfg.get('max_files_per_post', 3)} file/bai | "
+            f"{attachment_cfg.get('max_file_size_mb', 15)} MB/file"
+        )
+    else:
+        log("File dinh kem: OFF")
+
+    initial_baseline_done = False
+
     with sync_playwright() as pw:
-        context = launch_browser(pw, bool(cfg.get("headless", False)))
-        page = context.pages[0] if context.pages else context.new_page()
-        try:
-            ensure_login(page, cfg)
-            user_id = discover_user_id(page, cfg)
-            blog_url = f"{base_url}/blog/index.php?userid={user_id}"
-            log("Da xac dinh blog cua tai khoan dang nhap.")
+        while True:
+            context = None
+            try:
+                context = launch_browser(pw, bool(cfg.get("headless", False)))
+                page = context.pages[0] if context.pages else context.new_page()
 
-            if only_new:
-                initial = get_entries(page, blog_url, limit)
-                for eid, _ in initial:
-                    processed.add(eid)
-                save_processed(processed)
-                log(f"only_new_posts=true: bo qua {len(initial)} bai hien co.")
+                ensure_login(page, cfg)
+                user_id = discover_user_id(page, cfg)
+                blog_url = f"{base_url}/blog/index.php?userid={user_id}"
+                log("Da xac dinh blog cua tai khoan dang nhap.")
 
-            while True:
-                try:
-                    entries = get_entries(page, blog_url, limit)
-                    for eid, url in entries:
-                        if eid in processed:
-                            continue
-                        if process_entry(page, eid, url, cfg):
-                            processed.add(eid)
-                            save_processed(processed)
-                            if cooldown > 0:
-                                time.sleep(cooldown)
-                    time.sleep(interval)
-                except RuntimeError as exc:
-                    if str(exc) == "login_required":
-                        ensure_login(page, cfg)
-                        user_id = discover_user_id(page, cfg)
-                        blog_url = f"{base_url}/blog/index.php?userid={user_id}"
-                    else:
-                        log(f"Loi: {exc}")
+                if only_new and not initial_baseline_done:
+                    initial = get_entries(page, blog_url, limit)
+                    for eid, _ in initial:
+                        processed.add(eid)
+                    save_processed(processed)
+                    initial_baseline_done = True
+                    log(
+                        f"only_new_posts=true: bo qua {len(initial)} bai hien co. "
+                        "Moc nay chi tao mot lan trong moi lan chay bot."
+                    )
+                elif not only_new:
+                    initial_baseline_done = True
+
+                while True:
+                    try:
+                        entries = get_entries(page, blog_url, limit)
+
+                        for eid, url in entries:
+                            if eid in processed or eid in in_progress:
+                                continue
+
+                            in_progress.add(eid)
+                            try:
+                                if process_entry(page, eid, url, cfg):
+                                    processed.add(eid)
+                                    save_processed(processed)
+                                    if cooldown > 0:
+                                        time.sleep(cooldown)
+                            finally:
+                                in_progress.discard(eid)
+
                         time.sleep(interval)
-                except Exception as exc:
-                    log(f"Loi tam thoi: {type(exc).__name__}: {exc}")
-                    time.sleep(interval)
-        except KeyboardInterrupt:
-            log("Da dung bot.")
-        finally:
-            context.close()
-    return 0
+
+                    except KeyboardInterrupt:
+                        raise
+
+                    except RuntimeError as exc:
+                        code = str(exc)
+
+                        if code == "login_required":
+                            log("Phien LMS da het/bi vang. Dang tu dong dang nhap lai...")
+                            ensure_login(page, cfg)
+                            user_id = discover_user_id(page, cfg)
+                            blog_url = f"{base_url}/blog/index.php?userid={user_id}"
+                            log("Dang nhap lai thanh cong. Tiep tuc quet.")
+                            continue
+
+                        if code == "browser_restart_required":
+                            raise
+
+                        log(f"Loi tac vu: {exc}")
+                        log(f"Cho {interval}s roi thu lai...")
+                        time.sleep(interval)
+
+                    except Exception as exc:
+                        log(
+                            f"Mat ket noi/loi browser tam thoi: "
+                            f"{type(exc).__name__}: {exc}"
+                        )
+                        raise RuntimeError("browser_restart_required") from exc
+
+            except KeyboardInterrupt:
+                log("Da dung bot.")
+                release_single_instance(instance_lock)
+                return 0
+
+            except Exception as exc:
+                if str(exc) == "browser_restart_required":
+                    log("Can khoi tao lai phien browser.")
+                else:
+                    log(
+                        f"Phien LMS/browser gap loi: "
+                        f"{type(exc).__name__}: {exc}"
+                    )
+
+            finally:
+                if context is not None:
+                    try:
+                        context.close()
+                    except Exception:
+                        pass
+
+            log(f"Host van dang chay. Cho {reconnect_delay}s roi ket noi lai...")
+            time.sleep(reconnect_delay)
 
 if __name__ == "__main__":
     sys.exit(main())

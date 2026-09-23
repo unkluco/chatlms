@@ -146,6 +146,21 @@ if errorlevel 1 (
     echo [OK] Groq SDK da co san trong .venv.
 )
 
+"%VPY%" -c "import pypdf, docx, openpyxl" >nul 2>&1
+if errorlevel 1 (
+    echo [SETUP] Chua co bo thu vien doc file dinh kem.
+    echo [SETUP] Dang cai pypdf, python-docx, openpyxl CHI vao .venv...
+    "%VPY%" -m pip install pypdf python-docx openpyxl
+
+    if errorlevel 1 (
+        echo [ERROR] Cai thu vien doc file dinh kem that bai.
+        pause
+        exit /b 1
+    )
+) else (
+    echo [OK] Thu vien doc file dinh kem da co san trong .venv.
+)
+
 REM ==================================================
 REM 5. Chay bot
 REM ==================================================
@@ -155,7 +170,7 @@ echo [START] Khoi dong bot...
 echo ==========================================
 echo.
 
-"%VPY%" lms_blog_bot.py
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0RUN_BOT_JOB.ps1" -PythonExe "%VPY%" -ScriptPath "%~dp0lms_blog_bot.py"
 
 echo.
 echo Bot da dung.

@@ -53,3 +53,6 @@ desktop.ini
 *.tmp
 *.temp
 ~$*
+
+# Temporary downloaded LMS attachments
+.attachments/
