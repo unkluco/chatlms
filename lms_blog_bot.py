@@ -4,7 +4,7 @@ from datetime import datetime
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
-from health_monitor import write_health, cleanup_old_attachments
+from health_monitor import write_health, cleanup_old_attachments, get_process_memory_mb, should_restart_browser
 
 ROOT = Path(__file__).resolve().parent
 CONFIG_PATH = ROOT / "config.json"
@@ -828,6 +828,7 @@ def main():
     model = str(cfg.get("ai_model", "")).strip() or "openai/gpt-oss-120b"
 
     log("=== IUH LMS BLOG BOT ===")
+    write_health("starting")
     names = ", ".join(commands.keys()) if isinstance(commands, dict) else "(none)"
     detect_pattern = str(cfg.get("detect_pattern", "#bot"))
     log(f"Mau kich hoat: {detect_pattern!r}; scan moi {interval}s")
@@ -869,6 +870,7 @@ def main():
                 blog_url = f"{base_url}/blog/index.php?userid={user_id}"
                 processed = load_processed(account_key)
                 log("Da xac dinh blog cua dung tai khoan config.")
+                write_health("running", account=account_key, memory_mb=get_process_memory_mb())
 
                 if account_key not in initialized_accounts:
                     if only_new and not processed:
@@ -908,6 +910,11 @@ def main():
                             finally:
                                 in_progress.discard(eid)
 
+                        removed = cleanup_old_attachments(ATTACHMENT_DIR, 24)
+                        write_health("running", account=account_key, memory_mb=get_process_memory_mb(), removed_files=removed)
+                        if should_restart_browser(800):
+                            log("Phat hien RAM Python cao. Khoi tao lai browser de don bo nho.")
+                            raise RuntimeError("browser_restart_required")
                         time.sleep(interval)
 
                     except KeyboardInterrupt:
