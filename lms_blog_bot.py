@@ -4,6 +4,7 @@ from datetime import datetime
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
+from health_monitor import write_health, cleanup_old_attachments
 
 ROOT = Path(__file__).resolve().parent
 CONFIG_PATH = ROOT / "config.json"
@@ -820,6 +821,8 @@ def main():
     interval = max(2, int(cfg.get("poll_interval_seconds", 5)))
     limit = max(1, int(cfg.get("max_posts_per_scan", 10)))
     cooldown = max(0.0, float(cfg.get("cooldown_seconds", 0)))
+    health_interval = max(30, int(cfg.get("health_interval_seconds", 60)))
+    browser_restart_hours = max(1, float(cfg.get("browser_restart_hours", 6)))
     reconnect_delay = max(2, int(cfg.get("reconnect_delay_seconds", 5)))
     provider = str(cfg.get("provider", "groq") or "groq")
     model = str(cfg.get("ai_model", "")).strip() or "openai/gpt-oss-120b"
@@ -844,12 +847,16 @@ def main():
 
     # Ghi nho tai khoan da khoi tao scan trong process hien tai.
     initialized_accounts = set()
+    last_health = 0
+    browser_started_at = time.time()
 
     with sync_playwright() as pw:
         while True:
             context = None
             try:
                 context = launch_browser(pw, bool(cfg.get("headless", False)))
+                browser_started_at = time.time()
+                write_health("browser_started")
                 page = context.pages[0] if context.pages else context.new_page()
 
                 user_id, display_name = ensure_login(page, cfg)
@@ -877,6 +884,14 @@ def main():
 
                 while True:
                     try:
+                        if time.time() - last_health >= health_interval:
+                            removed = cleanup_old_attachments(ATTACHMENT_DIR, 24)
+                            write_health("running", account=account_key, removed_temp_files=removed)
+                            last_health = time.time()
+                        if time.time() - browser_started_at >= browser_restart_hours * 3600:
+                            log("Browser da chay du chu ky. Restart de giai phong tai nguyen.")
+                            raise RuntimeError("browser_restart_required")
+
                         entries = get_entries(page, blog_url, limit)
 
                         for eid, url in entries:
@@ -951,6 +966,7 @@ def main():
             finally:
                 if context is not None:
                     try:
+                        write_health("browser_closed")
                         context.close()
                     except Exception:
                         pass

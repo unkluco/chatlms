@@ -61,3 +61,4 @@ desktop.ini
 session_username.txt
 account_identities.json
 *.bak
+bot_health.json
