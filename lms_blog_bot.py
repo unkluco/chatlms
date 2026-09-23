@@ -13,6 +13,8 @@ SESSION_USER_PATH = ROOT / "session_username.txt"
 IDENTITY_PATH = ROOT / "account_identities.json"
 PROFILE_DIR = ROOT / ".browser_profile"
 ATTACHMENT_DIR = ROOT / ".attachments"
+RUNTIME_DIR = ROOT / ".bot_runtime"
+PID_PATH = RUNTIME_DIR / "bot.pid"
 LOG_DIR = ROOT / "logs"
 LOG_FILE = LOG_DIR / "bot.log"
 
@@ -83,6 +85,29 @@ def release_single_instance(lock):
         kernel32.CloseHandle(handle)
     except Exception:
         pass
+
+
+def create_runtime_pid():
+    """Luu PID de phat hien zombie process. Mutex van la lop chinh."""
+    try:
+        RUNTIME_DIR.mkdir(exist_ok=True)
+        PID_PATH.write_text(str(os.getpid()), encoding="utf-8")
+    except Exception:
+        pass
+
+
+def clear_runtime_pid():
+    try:
+        PID_PATH.unlink(missing_ok=True)
+    except Exception:
+        pass
+
+
+def load_runtime_pid():
+    try:
+        return int(PID_PATH.read_text(encoding="utf-8").strip())
+    except Exception:
+        return None
 
 def load_processed(account_key="default"):
     if not STATE_PATH.exists():
@@ -824,6 +849,8 @@ def main():
         log("Khong khoi dong instance thu hai de tranh binh luan trung.")
         return 2
 
+    create_runtime_pid()
+
     processed = load_processed()
     in_progress = set()
 
@@ -970,6 +997,7 @@ def main():
 
             except KeyboardInterrupt:
                 log("Da dung bot.")
+                clear_runtime_pid()
                 release_single_instance(instance_lock)
                 return 0
 
