@@ -8,6 +8,8 @@ from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeo
 ROOT = Path(__file__).resolve().parent
 CONFIG_PATH = ROOT / "config.json"
 STATE_PATH = ROOT / "processed.json"
+SESSION_USER_PATH = ROOT / "session_username.txt"
+IDENTITY_PATH = ROOT / "account_identities.json"
 PROFILE_DIR = ROOT / ".browser_profile"
 ATTACHMENT_DIR = ROOT / ".attachments"
 
@@ -33,10 +35,12 @@ def acquire_single_instance(cfg):
     if os.name != "nt":
         return None
 
+    # Mot project chi dung mot persistent browser profile, nen chi cho phep
+    # mot bot chay trong cung thu muc du config dang la tai khoan nao.
     identity = (
-        str(cfg.get("lms_base_url", "")).strip().lower()
+        str(ROOT).strip().lower()
         + "|"
-        + str(cfg.get("username", "")).strip().lower()
+        + str(cfg.get("lms_base_url", "")).strip().lower()
     )
     suffix = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:16]
     mutex_name = "Local\\IUH_LMS_BLOG_BOT_" + suffix
@@ -67,16 +71,31 @@ def release_single_instance(lock):
     except Exception:
         pass
 
-def load_processed():
+def load_processed(account_key="default"):
     if not STATE_PATH.exists():
         return set()
     try:
-        return set(map(str, json.loads(STATE_PATH.read_text(encoding="utf-8")).get("processed_entry_ids", [])))
+        data = json.loads(STATE_PATH.read_text(encoding="utf-8"))
+        # Ho tro ca format cu va format moi theo tung tai khoan
+        if "accounts" in data:
+            return set(map(str, data.get("accounts", {}).get(account_key, [])))
+        return set(map(str, data.get("processed_entry_ids", [])))
     except Exception:
         return set()
 
-def save_processed(items):
-    STATE_PATH.write_text(json.dumps({"processed_entry_ids": sorted(items)}, indent=2), encoding="utf-8")
+def save_processed(items, account_key="default"):
+    data = {"accounts": {}}
+    if STATE_PATH.exists():
+        try:
+            old = json.loads(STATE_PATH.read_text(encoding="utf-8"))
+            if "accounts" in old:
+                data = old
+            elif "processed_entry_ids" in old:
+                data["accounts"]["legacy"] = old["processed_entry_ids"]
+        except Exception:
+            pass
+    data.setdefault("accounts", {})[account_key] = sorted(map(str, items))
+    STATE_PATH.write_text(json.dumps(data, indent=2), encoding="utf-8")
 
 def entry_id(url):
     try:
@@ -126,92 +145,187 @@ def browser_needs_restart(page, exc=None):
     )
     return any(marker in message for marker in dead_markers)
 
-def ensure_login(page, cfg):
-    base_url = str(cfg.get("lms_base_url", "https://lms.iuh.edu.vn")).rstrip("/")
-    login_url = base_url + "/login/index.php"
-    retry_seconds = max(2, int(cfg.get("login_retry_seconds", 5)))
-    username = str(cfg.get("username", "")).strip()
-    password = str(cfg.get("password", ""))
+def _normalize_account_name(value):
+    return re.sub(r"\s+", " ", str(value or "")).strip().casefold()
 
-    first_try = True
 
-    while True:
-        try:
-            # Luon mo trang login. Neu session con song, Moodle hien thong bao
-            # "ban da dang nhap" (khong co form); neu het session, form login se xuat hien.
-            page.goto(login_url, wait_until="domcontentloaded", timeout=45000)
+def load_account_identities():
+    if not IDENTITY_PATH.exists():
+        return {}
+    try:
+        data = json.loads(IDENTITY_PATH.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
 
-            if not logged_out(page):
-                if first_try:
-                    log("Da co phien dang nhap LMS.")
-                else:
-                    log("Phien LMS da san sang lai.")
-                return
 
-            if username and password:
-                log("Dang tu dong dang nhap LMS bang config.json...")
-                page.locator('input[name="username"]').fill(username, timeout=10000)
-                page.locator('input[name="password"]').fill(password, timeout=10000)
-                page.locator(
-                    '#loginbtn, button[type="submit"], input[type="submit"]'
-                ).first.click(timeout=10000)
+def save_account_identity(username, user_id, display_name):
+    data = load_account_identities()
+    data[str(username)] = {
+        "userid": str(user_id),
+        "display_name": str(display_name or "").strip(),
+    }
+    IDENTITY_PATH.write_text(
+        json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
 
-                try:
-                    page.wait_for_load_state("domcontentloaded", timeout=30000)
-                except Exception:
-                    pass
 
-                page.wait_for_timeout(1000)
-
-                if not logged_out(page):
-                    log("Tu dong dang nhap thanh cong.")
-                    return
-
-                log(
-                    "Chua dang nhap duoc. Co the LMS dang yeu cau CAPTCHA/MFA "
-                    "hoac thong tin dang nhap chua dung."
-                )
-            else:
-                log("Thieu username/password trong config.json.")
-
-        except KeyboardInterrupt:
-            raise
-        except Exception as exc:
-            if browser_needs_restart(page, exc):
-                raise RuntimeError("browser_restart_required") from exc
-            log(
-                f"Khong ket noi/dang nhap duoc LMS: "
-                f"{type(exc).__name__}: {exc}"
-            )
-
-        first_try = False
-        log(f"Cho {retry_seconds}s roi thu dang nhap lai...")
-        time.sleep(retry_seconds)
-
-def discover_user_id(page, cfg):
+def discover_session_identity(page, cfg):
     base_url = str(cfg.get("lms_base_url", "https://lms.iuh.edu.vn")).rstrip("/")
     page.goto(base_url + "/", wait_until="domcontentloaded", timeout=45000)
 
-    selectors = [
+    name = ""
+    name_selectors = [
+        '[data-region="usermenu"] .usertext',
+        '.usermenu .usertext',
+        '#user-menu-toggle .usertext',
+        '.logininfo a[href*="/user/profile.php?id="]',
+    ]
+    for selector in name_selectors:
+        try:
+            loc = page.locator(selector)
+            if loc.count() > 0:
+                value = loc.first.inner_text(timeout=2000).strip()
+                if value:
+                    name = value
+                    break
+        except Exception:
+            pass
+
+    profile_selectors = [
         '[data-region="usermenu"] a[href*="/user/profile.php?id="]',
         '.usermenu a[href*="/user/profile.php?id="]',
         '.logininfo a[href*="/user/profile.php?id="]',
-        'a[href*="/user/profile.php?id="]'
     ]
-
-    for selector in selectors:
+    for selector in profile_selectors:
         try:
             links = page.locator(selector)
             for i in range(min(links.count(), 20)):
                 href = links.nth(i).get_attribute("href") or ""
                 values = parse_qs(urlparse(href).query).get("id")
                 if values and values[0].isdigit():
-                    debug_log(cfg, f"Phat hien profile URL: {href}")
-                    return values[0]
+                    if not name:
+                        try:
+                            name = links.nth(i).inner_text(timeout=1500).strip()
+                        except Exception:
+                            pass
+                    debug_log(cfg, f"Session profile: userid={values[0]}, name={name!r}")
+                    return values[0], name
         except Exception:
             pass
 
-    raise RuntimeError("Khong xac dinh duoc userid tu URL ho so sau khi dang nhap.")
+    return None, name
+
+
+def _login_with_config(page, cfg, reason=""):
+    base_url = str(cfg.get("lms_base_url", "https://lms.iuh.edu.vn")).rstrip("/")
+    login_url = base_url + "/login/index.php"
+    username = str(cfg.get("username", "")).strip()
+    password = str(cfg.get("password", ""))
+    if not username or not password:
+        raise RuntimeError("Thieu username/password trong config.json.")
+
+    if reason:
+        log(reason)
+    # Profile nay chi danh cho bot, xoa cookie la cach chac chan nhat de cat session cu.
+    try:
+        page.context.clear_cookies()
+    except Exception:
+        pass
+
+    page.goto(login_url, wait_until="domcontentloaded", timeout=45000)
+    if not logged_out(page):
+        raise RuntimeError("Khong dua LMS ve duoc man hinh dang nhap sau khi xoa cookie.")
+
+    log(f"Dang dang nhap LMS theo username trong config: {username}")
+    page.locator('input[name="username"]').fill(username, timeout=10000)
+    page.locator('input[name="password"]').fill(password, timeout=10000)
+    page.locator('#loginbtn, button[type="submit"], input[type="submit"]').first.click(timeout=10000)
+    try:
+        page.wait_for_load_state("domcontentloaded", timeout=30000)
+    except Exception:
+        pass
+    page.wait_for_timeout(1000)
+
+    if logged_out(page):
+        raise RuntimeError("Dang nhap theo config that bai; kiem tra username/password hoac CAPTCHA/MFA.")
+
+    user_id, display_name = discover_session_identity(page, cfg)
+    if not user_id:
+        raise RuntimeError("Dang nhap thanh cong nhung khong xac dinh duoc userid cua tai khoan.")
+
+    save_account_identity(username, user_id, display_name)
+    SESSION_USER_PATH.write_text(username, encoding="utf-8")
+    log(f"Da xac minh tai khoan config: {display_name or '(khong doc duoc ten)'} | userid={user_id}")
+    return user_id, display_name
+
+
+def ensure_login(page, cfg):
+    base_url = str(cfg.get("lms_base_url", "https://lms.iuh.edu.vn")).rstrip("/")
+    login_url = base_url + "/login/index.php"
+    retry_seconds = max(2, int(cfg.get("login_retry_seconds", 5)))
+    username = str(cfg.get("username", "")).strip()
+
+    while True:
+        try:
+            identities = load_account_identities()
+            expected = identities.get(username)
+            old_user = SESSION_USER_PATH.read_text(encoding="utf-8").strip() if SESSION_USER_PATH.exists() else ""
+
+            page.goto(login_url, wait_until="domcontentloaded", timeout=45000)
+            if logged_out(page):
+                return _login_with_config(page, cfg, "LMS chua dang nhap; dung tai khoan trong config.json.")
+
+            current_id, current_name = discover_session_identity(page, cfg)
+
+            # Tai khoan nay chua tung duoc xac minh bang credential trong config.
+            # Khong tin session persistent hien tai: dang nhap lai mot lan de lap moc chuan.
+            if not expected:
+                return _login_with_config(
+                    page, cfg,
+                    f"Chua co moc danh tinh cho username {username}; dang nhap lai de xac minh dung tai khoan."
+                )
+
+            expected_id = str(expected.get("userid", ""))
+            expected_name = str(expected.get("display_name", "")).strip()
+            mismatch = False
+            reasons = []
+
+            if old_user and old_user != username:
+                mismatch = True
+                reasons.append(f"config doi {old_user} -> {username}")
+            if not current_id or str(current_id) != expected_id:
+                mismatch = True
+                reasons.append(f"userid session={current_id}, expected={expected_id}")
+            if expected_name and current_name and _normalize_account_name(current_name) != _normalize_account_name(expected_name):
+                mismatch = True
+                reasons.append(f"ten session={current_name!r}, expected={expected_name!r}")
+
+            if mismatch:
+                return _login_with_config(
+                    page, cfg,
+                    "Phat hien session LMS khong dung tai khoan config (" + "; ".join(reasons) + "). Dang xuat session cu va dang nhap lai."
+                )
+
+            SESSION_USER_PATH.write_text(username, encoding="utf-8")
+            log(f"Session dung tai khoan config: {current_name or expected_name or username} | userid={current_id}")
+            return current_id, current_name or expected_name
+
+        except KeyboardInterrupt:
+            raise
+        except Exception as exc:
+            if browser_needs_restart(page, exc):
+                raise RuntimeError("browser_restart_required") from exc
+            log(f"Khong xac minh/dang nhap duoc LMS: {type(exc).__name__}: {exc}")
+            log(f"Cho {retry_seconds}s roi thu lai...")
+            time.sleep(retry_seconds)
+
+
+def discover_user_id(page, cfg):
+    user_id, _ = discover_session_identity(page, cfg)
+    if user_id:
+        return user_id
+    raise RuntimeError("Khong xac dinh duoc userid cua session dang dang nhap.")
 
 def get_entries(page, blog_url, limit):
     page.goto(blog_url, wait_until="domcontentloaded", timeout=45000)
@@ -693,7 +807,7 @@ def main():
 
     instance_lock = acquire_single_instance(cfg)
     if instance_lock is False:
-        log("Bot cho tai khoan LMS nay dang chay o mot process khac.")
+        log("Bot cho project/profile LMS nay dang chay o mot process khac.")
         log("Khong khoi dong instance thu hai de tranh binh luan trung.")
         return 2
 
@@ -728,7 +842,8 @@ def main():
     else:
         log("File dinh kem: OFF")
 
-    initial_baseline_done = False
+    # Ghi nho tai khoan da khoi tao scan trong process hien tai.
+    initialized_accounts = set()
 
     with sync_playwright() as pw:
         while True:
@@ -737,23 +852,28 @@ def main():
                 context = launch_browser(pw, bool(cfg.get("headless", False)))
                 page = context.pages[0] if context.pages else context.new_page()
 
-                ensure_login(page, cfg)
-                user_id = discover_user_id(page, cfg)
+                user_id, display_name = ensure_login(page, cfg)
+                expected_username = str(cfg.get("username", "")).strip()
+                account_key = f"{expected_username}:{user_id}"
+                log(
+                    f"Tai khoan da xac minh: username={expected_username}, "
+                    f"ten={display_name or '(khong doc duoc)'}, userid={user_id}"
+                )
                 blog_url = f"{base_url}/blog/index.php?userid={user_id}"
-                log("Da xac dinh blog cua tai khoan dang nhap.")
+                processed = load_processed(account_key)
+                log("Da xac dinh blog cua dung tai khoan config.")
 
-                if only_new and not initial_baseline_done:
-                    initial = get_entries(page, blog_url, limit)
-                    for eid, _ in initial:
-                        processed.add(eid)
-                    save_processed(processed)
-                    initial_baseline_done = True
-                    log(
-                        f"only_new_posts=true: bo qua {len(initial)} bai hien co. "
-                        "Moc nay chi tao mot lan trong moi lan chay bot."
-                    )
-                elif not only_new:
-                    initial_baseline_done = True
+                if account_key not in initialized_accounts:
+                    if only_new and not processed:
+                        initial = get_entries(page, blog_url, limit)
+                        for eid, _ in initial:
+                            processed.add(eid)
+                        save_processed(processed, account_key)
+                        log(
+                            f"only_new_posts=true: tao moc bo qua {len(initial)} bai hien co "
+                            f"cho tai khoan {account_key}."
+                        )
+                    initialized_accounts.add(account_key)
 
                 while True:
                     try:
@@ -767,7 +887,7 @@ def main():
                             try:
                                 if process_entry(page, eid, url, cfg):
                                     processed.add(eid)
-                                    save_processed(processed)
+                                    save_processed(processed, account_key)
                                     if cooldown > 0:
                                         time.sleep(cooldown)
                             finally:
@@ -782,11 +902,22 @@ def main():
                         code = str(exc)
 
                         if code == "login_required":
-                            log("Phien LMS da het/bi vang. Dang tu dong dang nhap lai...")
-                            ensure_login(page, cfg)
-                            user_id = discover_user_id(page, cfg)
+                            log("Phien LMS da het/bi vang. Dang xac minh va dang nhap lai theo config...")
+                            user_id, display_name = ensure_login(page, cfg)
+                            new_account_key = f"{expected_username}:{user_id}"
                             blog_url = f"{base_url}/blog/index.php?userid={user_id}"
-                            log("Dang nhap lai thanh cong. Tiep tuc quet.")
+                            if new_account_key != account_key:
+                                log(f"Tai khoan sau reconnect thay doi {account_key} -> {new_account_key}; nap state rieng.")
+                                account_key = new_account_key
+                                processed = load_processed(account_key)
+                                if account_key not in initialized_accounts:
+                                    if only_new and not processed:
+                                        initial = get_entries(page, blog_url, limit)
+                                        for eid, _ in initial:
+                                            processed.add(eid)
+                                        save_processed(processed, account_key)
+                                    initialized_accounts.add(account_key)
+                            log(f"Dang nhap lai dung tai khoan: {display_name or expected_username} | userid={user_id}")
                             continue
 
                         if code == "browser_restart_required":

@@ -56,3 +56,8 @@ desktop.ini
 
 # Temporary downloaded LMS attachments
 .attachments/
+
+# Account/session identity cache
+session_username.txt
+account_identities.json
+*.bak

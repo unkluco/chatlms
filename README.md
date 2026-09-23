@@ -5,28 +5,29 @@ Bot theo dõi Blog cá nhân trên LMS IUH, tìm bài có mẫu kích hoạt, g�
 ## Tính năng hiện tại
 
 - Tự đăng nhập LMS bằng tài khoản trong `config.json`.
-- Giữ session bằng profile riêng `.browser_profile`; nếu session còn sống thì dùng lại.
+- Giữ session bằng profile riêng `.browser_profile`; trước khi dùng lại bot xác minh `userid` và tên hiển thị đúng với tài khoản `username` trong `config.json`.
 - Tự đăng nhập lại khi session hết hạn hoặc bị văng khỏi LMS.
 - Tự reconnect và tạo lại browser khi mất mạng/browser lỗi; host không tự dừng vì một lỗi tạm thời.
-- Tự xác định `userid` của tài khoản đang đăng nhập, không cần nhập ID Blog thủ công.
+- Tự xác định `userid` của tài khoản trong `config.json`; nếu persistent session đang là tài khoản cũ/khác, bot tự xóa cookie và đăng nhập lại đúng tài khoản.
 - Quét Blog theo chu kỳ và chỉ xử lý bài có mẫu kích hoạt.
 - Hỗ trợ tìm mẫu kích hoạt trong tiêu đề, nội dung hoặc cả hai.
 - Hỗ trợ lệnh phụ cấu hình được như `#short`, `#code`, `#nocmt`.
 - Đọc file đính kèm: PDF, DOCX, XLSX, CSV và nhiều định dạng text/code.
 - Giới hạn số file, dung lượng và lượng text trích xuất để tránh prompt quá lớn.
-- Lưu `processed.json` để tránh comment lặp lại cùng bài.
-- Chống chạy hai bot cùng tài khoản trên Windows bằng single-instance mutex.
+- Lưu `processed.json` tách theo khóa `username:userid` để tránh comment lặp và không lẫn trạng thái giữa nhiều tài khoản.
+- Chống chạy hai bot đồng thời trong cùng project/browser profile trên Windows bằng single-instance mutex.
 - Chạy trong Windows Job Object: đóng cửa sổ launcher thì Python và browser của bot cũng dừng theo.
 - Tự tạo `.venv` và tự cài dependency cần thiết khi chạy `START_BOT.bat`.
 
 ## Thay đổi gần đây
 
 - Sửa logic nhận diện trạng thái đăng nhập: không còn nhầm trang `/login/index.php` là đã logout khi session thực tế vẫn còn.
+- Thêm xác minh danh tính tài khoản: lưu `username -> userid + display_name`; nếu tên/ID session không khớp config, bot chủ động đăng xuất session cũ và đăng nhập lại.
 - Thêm tự đăng nhập lại khi session hết và tự reconnect khi browser/mạng lỗi.
 - Thêm đọc nội dung file đính kèm trực tiếp từ bài Blog.
 - Thêm `in_progress` + single-instance mutex để giảm nguy cơ comment trùng.
 - Thêm Windows Job Object để đóng launcher là dừng luôn Python và browser của bot.
-- Sửa `only_new_posts` để baseline chỉ tạo một lần trong mỗi lần chạy, kể cả sau reconnect.
+- Sửa `only_new_posts` để baseline chỉ được tạo khi tài khoản chưa có state; restart/reconnect không đánh dấu lại các bài mới thành bài cũ.
 
 ---
 
@@ -52,7 +53,7 @@ Sau khi clone:
 3. Chạy `START_BOT.bat`.
 4. Lần đầu bot sẽ tự tạo `.venv` và cài thư viện cần thiết.
 
-`config.json`, `.browser_profile`, `.attachments`, `processed.json` và `.venv` đều là dữ liệu local và đã được bỏ qua trong Git.
+`config.json`, `.browser_profile`, `.attachments`, `processed.json`, `account_identities.json`, `session_username.txt` và `.venv` đều là dữ liệu local và đã được bỏ qua trong Git.
 
 ---
 
@@ -185,13 +186,15 @@ Mở Chrome → nếu lỗi thử Edge → nếu lỗi thử Chromium của Play
   ↓
 Mở trang login LMS
   ↓
-Có form username + password?
-  ├─ Không → session vẫn còn → dùng tiếp
-  └─ Có → tự điền config.json và đăng nhập
+Đọc session hiện tại: userid + tên hiển thị
   ↓
-Tự xác định userid
+So với danh tính đã xác minh của username trong config.json
+  ├─ Khớp → dùng tiếp session
+  └─ Không khớp/chưa có mốc → xóa cookie session cũ → đăng nhập lại bằng config.json
   ↓
-Mở Blog và bắt đầu quét
+Lưu username -> userid + display_name vào account_identities.json
+  ↓
+Mở đúng Blog của userid đã xác minh và bắt đầu quét
 ```
 
 Điểm quan trọng: bot **không còn kết luận logout chỉ vì URL chứa `/login/`**. Moodle có thể mở `/login/index.php` ngay cả khi người dùng đã đăng nhập. Bot chỉ xem là logout khi form `username` và `password` thực sự xuất hiện.
@@ -294,11 +297,11 @@ Nếu tải file trả về HTML thay vì file thật, bot xem đó là dấu hi
 
 ## 7. Chống xử lý trùng
 
-Bot có hai lớp bảo vệ:
+Bot có nhiều lớp bảo vệ:
 
 ### `processed.json`
 
-Lưu `entryid` của các bài đã comment thành công. Khi quét lại, các entry này được bỏ qua.
+Lưu `entryid` theo từng khóa `username:userid`. Vì vậy hai tài khoản khác nhau có thể có cùng `entryid` mà không bị coi nhầm là đã xử lý.
 
 Muốn test lại bài cũ:
 
@@ -314,13 +317,7 @@ Trong một phiên chạy, entry đang xử lý được giữ trong bộ nhớ 
 
 ### Single instance trên Windows
 
-Bot tạo mutex dựa trên:
-
-```text
-lms_base_url + username
-```
-
-Nếu mở bot lần thứ hai với cùng tài khoản, instance mới sẽ tự dừng thay vì cùng comment vào một bài.
+Bot tạo mutex theo thư mục project + `lms_base_url`. Một project chỉ dùng một `.browser_profile`, nên instance thứ hai sẽ tự dừng kể cả khi `config.json` đã đổi sang tài khoản khác.
 
 ---
 
@@ -332,9 +329,9 @@ Nếu:
 "only_new_posts": true
 ```
 
-khi khởi động, bot lấy tối đa `max_posts_per_scan` bài đang có và đánh dấu chúng là đã biết. Sau đó chỉ bài mới xuất hiện mới được xử lý.
+khi tài khoản `username:userid` chưa từng có state, bot lấy các bài đang thấy và tạo baseline một lần cho chính tài khoản đó. Sau đó chỉ bài mới xuất hiện mới được xử lý.
 
-Mốc baseline này chỉ được tạo **một lần trong mỗi lần chạy bot**. Nếu mất mạng rồi reconnect, bot không tạo lại baseline nên không vô tình bỏ qua bài vừa xuất hiện.
+Restart hoặc reconnect không tạo lại baseline nếu tài khoản đã có state trong `processed.json`; đổi sang tài khoản khác sẽ dùng state riêng.
 
 Nếu muốn bot có thể xử lý bài cũ chưa có trong `processed.json`:
 
@@ -377,7 +374,7 @@ Groq:
 
 ## 10. Bot xác định Blog của ai?
 
-Sau khi đăng nhập, bot tìm link profile dạng:
+Sau khi mở session, bot đọc danh tính người đang đăng nhập và tìm link profile dạng:
 
 ```text
 /user/profile.php?id=XXXX
@@ -389,7 +386,7 @@ rồi lấy `XXXX` để tạo:
 https://lms.iuh.edu.vn/blog/index.php?userid=XXXX
 ```
 
-Do đó không cần cấu hình `userid`. Nếu đổi tài khoản trong `config.json`, bot sẽ theo Blog của tài khoản mới.
+Do đó không cần cấu hình `userid`. Lần đầu gặp một `username`, bot chủ động đăng nhập bằng credential trong `config.json` để xác minh `userid` và tên hiển thị rồi lưu vào `account_identities.json`. Các lần sau nếu session đang là tài khoản khác, bot phát hiện lệch tên/ID và tự đăng nhập lại đúng tài khoản.
 
 ---
 
@@ -405,8 +402,9 @@ AI provider: groq; model: openai/gpt-oss-120b
 Tu dong reconnect sau 5s neu mat ket noi.
 File dinh kem: ON | toi da 3 file/bai | 15 MB/file
 Mo trinh duyet chrome...
-Da co phien dang nhap LMS.
-Da xac dinh blog cua tai khoan dang nhap.
+Session dung tai khoan config: <ten hien thi> | userid=<id>
+Tai khoan da xac minh: username=<username>, ten=<ten hien thi>, userid=<id>
+Da xac dinh blog cua dung tai khoan config.
 ```
 
 Khi phát hiện bài:
@@ -420,8 +418,8 @@ Entry ...: Da gui binh luan.
 Khi session hết:
 
 ```text
-Phien LMS da het/bi vang. Dang tu dong dang nhap lai...
-Dang nhap lai thanh cong. Tiep tuc quet.
+Phien LMS da het/bi vang. Dang xac minh va dang nhap lai theo config...
+Dang nhap lai dung tai khoan: <ten hien thi> | userid=<id>
 ```
 
 Khi browser/mạng lỗi:
@@ -442,7 +440,9 @@ lms_bot/
 ├─ RUN_BOT_JOB.ps1       # Windows Job Object, quản lý process con
 ├─ RESET_PROCESSED.bat   # Xóa trạng thái bài đã xử lý
 ├─ config.json           # Secret/local config, không commit
-├─ processed.json        # Runtime state, không commit
+├─ processed.json        # Runtime state theo username:userid, không commit
+├─ account_identities.json # Cache username -> userid + display_name, không commit
+├─ session_username.txt  # Username session gần nhất, không commit
 ├─ .browser_profile/     # Cookie/session browser, không commit
 ├─ .attachments/         # File LMS tải tạm, không commit
 ├─ .venv/                # Python virtual environment
@@ -469,6 +469,8 @@ auth.json
 .env
 .env.*
 processed.json
+account_identities.json
+session_username.txt
 .browser_profile/
 .attachments/
 .venv/
