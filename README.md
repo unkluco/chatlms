@@ -12,7 +12,8 @@ Bot theo dõi Blog cá nhân trên LMS IUH, tìm bài có mẫu kích hoạt, g�
 - Theo dõi RAM Python + toàn bộ process con Playwright/Chrome; nếu vượt ngưỡng thì yêu cầu supervisor restart toàn bộ bot.
 - Ghi heartbeat vào `bot_health.json`; `RUN_BOT_JOB.ps1` giám sát heartbeat từ bên ngoài và trả exit code `75` khi bot treo/stale để `START_BOT.bat` tự khởi động lại.
 - Tự xác định `userid` của tài khoản trong `config.json`; nếu persistent session đang là tài khoản cũ/khác, bot tự xóa cookie và đăng nhập lại đúng tài khoản.
-- Quét Blog theo chu kỳ và chỉ xử lý bài có mẫu kích hoạt.
+- Quét nhanh trang đầu theo chu kỳ và chạy deep scan định kỳ qua pagination để không bỏ sót backlog khi có nhiều hơn `max_posts_per_scan` bài mới.
+- Chỉ đánh dấu bài đã xử lý sau khi comment được xác minh trên LMS; câu trả lời đang chờ gửi được lưu vào `pending_comments.json` để tránh comment trùng sau crash/restart.
 - Hỗ trợ tìm mẫu kích hoạt trong tiêu đề, nội dung hoặc cả hai.
 - Hỗ trợ lệnh phụ cấu hình được như `#short`, `#code`, `#nocmt`.
 - Đọc file đính kèm: PDF, DOCX, XLSX, CSV và nhiều định dạng text/code.
@@ -57,12 +58,12 @@ Yêu cầu khuyến nghị:
 
 Sau khi clone:
 
-1. Tạo `config.json` trong thư mục project.
-2. Điền tài khoản LMS, mật khẩu và Groq API key.
+1. Copy `config.example.json` thành `config.json`.
+2. Điền tài khoản LMS, mật khẩu và Groq API key; hoặc dùng biến môi trường `LMS_USERNAME`, `LMS_PASSWORD`, `GROQ_API_KEY`.
 3. Chạy `START_BOT.bat`.
-4. Lần đầu bot sẽ tự tạo `.venv` và cài thư viện cần thiết.
+4. Lần đầu bot sẽ tự tạo `.venv` và đồng bộ đúng dependency trong `requirements.txt`.
 
-`config.json`, `.browser_profile`, `.attachments`, `processed.json`, `account_identities.json`, `session_username.txt` và `.venv` đều là dữ liệu local và đã được bỏ qua trong Git.
+`config.json`, `.browser_profile`, `.attachments`, `processed.json`, `pending_comments.json`, `bot_health.json`, `account_identities.json`, `session_username.txt`, `.bot_runtime`, `logs` và `.venv` đều là dữ liệu local và đã được bỏ qua trong Git.
 
 ---
 
@@ -78,12 +79,11 @@ Launcher hiện thực hiện các bước:
 
 1. Kiểm tra `.venv`; nếu lỗi hoặc chưa có thì tự tạo lại.
 2. Kiểm tra `pip`.
-3. Cài/kiểm tra `playwright`.
-4. Cài/kiểm tra `groq`.
-5. Cài/kiểm tra `pypdf`, `python-docx`, `openpyxl`.
-6. Cài/kiểm tra `psutil` cho health/memory watchdog.
-7. Gọi `RUN_BOT_JOB.ps1` để chạy bot trong Windows Job Object và giám sát heartbeat.
-8. Nếu supervisor trả exit code `75`, launcher chờ 5 giây rồi tự khởi động lại bot.
+3. Nếu có `requirements.txt`, đồng bộ đúng các phiên bản dependency đã pin.
+4. Nếu không có file pin, fallback sang kiểm tra/cài riêng Playwright, Groq, thư viện đọc file và `psutil`.
+5. Gọi `RUN_BOT_JOB.ps1` để chạy bot trong Windows Job Object và giám sát heartbeat.
+6. Nếu bot dừng bất thường hoặc yêu cầu restart, launcher tự chạy lại với backoff 5 → 10 → 30 → 60 → tối đa 300 giây.
+7. Exit code `2` (đã có instance khác) và `3` (config/state/AI permanent error) sẽ dừng thay vì restart vô hạn.
 
 Khi đóng cửa sổ `START_BOT.bat`, Job Object sẽ dừng cả Python và browser con của bot, tránh tình trạng bot vẫn chạy ngầm.
 
@@ -106,13 +106,20 @@ Ví dụ cấu hình đang phù hợp với phiên bản hiện tại:
   "default_system_prompt": "Trả lời đúng trọng tâm câu hỏi, rõ ràng, tự nhiên và hữu ích.",
   "poll_interval_seconds": 6,
   "max_posts_per_scan": 10,
+  "fast_scan_pages": 1,
+  "deep_scan_interval_seconds": 300,
+  "deep_scan_max_posts": 500,
+  "deep_scan_max_pages": 100,
   "max_answer_length": 6000,
   "retry_count": 2,
   "retry_delay_seconds": 2,
+  "retry_max_delay_seconds": 30,
   "cooldown_seconds": 0,
+  "ignored_recheck_seconds": 300,
   "only_new_posts": true,
   "debug": true,
   "headless": true,
+  "ignore_https_errors": false,
   "reconnect_delay_seconds": 5,
   "login_retry_seconds": 5,
   "health_interval_seconds": 60,
@@ -168,15 +175,25 @@ Nếu dùng `title`, phần nội dung sau mẫu kích hoạt trong tiêu đề 
 
 `poll_interval_seconds`: số giây giữa hai lần quét Blog. Code ép tối thiểu 2 giây.
 
-`max_posts_per_scan`: số entry tối đa lấy trong mỗi vòng quét.
+`max_posts_per_scan`: số bài chưa xử lý tối đa ở vòng quét nhanh. Các bài đã có trong `processed.json` không chiếm quota này.
+
+`fast_scan_pages`: số trang pagination được quét ở vòng nhanh. Mặc định 1 để giảm tải LMS.
+
+`deep_scan_interval_seconds`: chu kỳ chạy deep scan để tìm backlog nằm ở trang cũ hơn. Mặc định 300 giây.
+
+`deep_scan_max_posts`: số bài chưa xử lý tối đa mỗi deep scan. Mặc định 500.
+
+`deep_scan_max_pages`: số trang tối đa một deep scan có thể đi qua. Mặc định 100.
 
 `max_answer_length`: giới hạn số ký tự của câu trả lời trước khi comment.
 
-`retry_count`: số lần retry thêm khi gọi AI lỗi.
+`retry_count`: số lần retry thêm khi gọi AI lỗi tạm thời.
 
-`retry_delay_seconds`: thời gian chờ giữa các lần retry AI.
+`retry_delay_seconds`, `retry_max_delay_seconds`: AI retry dùng exponential backoff + jitter, bắt đầu từ delay cơ sở và không vượt quá max delay. Lỗi xác thực/quyền/model không tồn tại được coi là permanent error và bot dừng để tránh spam API.
 
 `cooldown_seconds`: thời gian nghỉ thêm sau khi comment thành công.
+
+`ignored_recheck_seconds`: bài mới chưa có marker không bị đánh dấu processed vĩnh viễn; bot tạm bỏ qua rồi kiểm tra lại sau khoảng thời gian này để vẫn bắt được trường hợp người dùng sửa bài và thêm `@bot` sau đó.
 
 `debug`: bật log chi tiết như URL profile được phát hiện và lỗi retry AI.
 
@@ -184,6 +201,8 @@ Nếu dùng `title`, phần nội dung sau mẫu kích hoạt trong tiêu đề 
 
 - `true`: browser chạy ẩn.
 - `false`: hiện cửa sổ browser, phù hợp khi debug.
+
+`ignore_https_errors`: mặc định `false`. Chỉ bật khi môi trường test dùng certificate tự ký; với LMS thật nên giữ `false` để browser xác minh TLS bình thường.
 
 `reconnect_delay_seconds`: thời gian chờ trước khi bot tạo lại phiên browser sau lỗi kết nối/browser.
 
@@ -339,13 +358,21 @@ Bot có nhiều lớp bảo vệ:
 
 Lưu `entryid` theo từng khóa `username:userid`. Vì vậy hai tài khoản khác nhau có thể có cùng `entryid` mà không bị coi nhầm là đã xử lý. State được giới hạn tối đa 50.000 ID cho mỗi tài khoản để file không tăng vô hạn; bot ưu tiên giữ các ID entry mới hơn.
 
-Muốn test lại bài cũ:
+File state có version + `account_meta`, được ghi atomic và có `processed.json.bak` làm last-known-good. Nếu file chính hỏng, bot thử phục hồi từ backup; nếu cả hai đều không hợp lệ thì bot dừng với exit code `3` thay vì coi state rỗng và có nguy cơ comment trùng.
+
+### `pending_comments.json`
+
+Trước khi bấm gửi comment, bot lưu câu trả lời AI vào pending state. Khi restart/crash, bot dùng lại đúng câu trả lời đó và kiểm tra xem comment đã tồn tại trên LMS hay chưa trước khi gửi lại.
+
+Thứ tự ghi được cố ý thiết kế là: **lưu pending → gửi + xác minh comment → lưu processed → xóa pending**. Nhờ vậy crash ở giữa quy trình không tạo cửa sổ mà cả pending lẫn processed đều biến mất. Pending đã thuộc entry processed sẽ được tự dọn ở lần khởi động/reconnect sau.
+
+Muốn reset state, hãy **dừng bot trước** rồi chạy:
 
 ```text
 RESET_PROCESSED.bat
 ```
 
-File này sẽ xóa `processed.json`.
+File này xóa cả `processed.json`/backup và `pending_comments.json`/backup. Nếu `only_new_posts=true`, lần chạy sau sẽ tạo baseline mới và vẫn bỏ qua các bài đang tồn tại. Muốn test lại bài cũ, hãy đặt `only_new_posts=false` trước khi chạy bot sau khi reset.
 
 ### `in_progress`
 
@@ -365,9 +392,11 @@ Nếu:
 "only_new_posts": true
 ```
 
-khi tài khoản `username:userid` chưa từng có state, bot lấy các bài đang thấy và tạo baseline một lần cho chính tài khoản đó. Sau đó chỉ bài mới xuất hiện mới được xử lý.
+khi tài khoản `username:userid` chưa từng có state, bot tạo một mốc `ignore_through_entry_id` dựa trên entry hiện có. Những entry cũ hơn hoặc bằng mốc được coi là lịch sử; entry có ID mới hơn mới được xét xử lý.
 
-Restart hoặc reconnect không tạo lại baseline nếu tài khoản đã có state trong `processed.json`; đổi sang tài khoản khác sẽ dùng state riêng.
+Vòng quét nhanh ưu tiên bài mới ở trang đầu. Deep scan định kỳ đi qua pagination và chỉ tính các bài chưa xử lý vào quota, nên trường hợp trang đầu toàn bài đã processed vẫn có thể đi tiếp xuống backlog phía sau.
+
+Restart hoặc reconnect không tạo lại baseline nếu account đã có metadata trong `processed.json`; đổi sang tài khoản khác sẽ dùng state/mốc riêng.
 
 Nếu muốn bot có thể xử lý bài cũ chưa có trong `processed.json`:
 
@@ -483,21 +512,28 @@ Log đồng thời được ghi vào `logs/bot.log`. Khi file vượt 10 MB, bot
 lms_bot/
 ├─ lms_blog_bot.py       # Logic chính
 ├─ health_monitor.py     # Heartbeat, RAM monitor, cleanup runtime
-├─ START_BOT.bat         # Launcher, tạo venv + dependency + auto restart code 75
+├─ START_BOT.bat         # Launcher, dependency pinned + restart backoff
 ├─ RUN_BOT_JOB.ps1       # Job Object + external heartbeat watchdog
-├─ RESET_PROCESSED.bat   # Xóa trạng thái bài đã xử lý
+├─ RESET_PROCESSED.bat   # Reset processed + pending state
+├─ requirements.txt      # Dependency versions đã pin
+├─ config.example.json   # Mẫu config an toàn để copy
 ├─ config.json           # Secret/local config, không commit
-├─ processed.json        # Runtime state theo username:userid, không commit
+├─ processed.json        # Runtime state + account metadata, không commit
+├─ pending_comments.json # Pending answer chống comment trùng, không commit
 ├─ bot_health.json       # Heartbeat/health runtime, không commit
 ├─ account_identities.json # Cache username -> userid + display_name, không commit
 ├─ session_username.txt  # Username session gần nhất, không commit
+├─ .github/
+│  ├─ workflows/tests.yml # CI compile + unit test + dependency audit
+│  └─ dependabot.yml      # Theo dõi dependency update
 ├─ .bot_runtime/         # PID/runtime state, không commit
 ├─ logs/                 # Log runtime/rotated logs, không commit
 ├─ .browser_profile/     # Cookie/session browser, không commit
 ├─ .attachments/         # File LMS tải tạm, không commit
 ├─ .venv/                # Python virtual environment
 ├─ tests/
-│  └─ test_runtime_safety.py # Test atomic state/health, state cap, log retention
+│  ├─ test_runtime_safety.py
+│  └─ test_core_behavior.py
 └─ README.md
 ```
 
@@ -511,7 +547,9 @@ lms_bot/
 - mật khẩu LMS;
 - Groq API key.
 
-Không commit, upload hoặc gửi công khai file này.
+Không commit, upload hoặc gửi công khai file này. Bot cũng hỗ trợ override secret bằng biến môi trường `LMS_USERNAME`, `LMS_PASSWORD`, `GROQ_API_KEY`; cách này phù hợp hơn khi chạy bằng Task Scheduler/CI hoặc khi không muốn lưu credential trực tiếp trong JSON.
+
+Kết nối LMS mặc định **không** bỏ qua lỗi chứng chỉ TLS (`ignore_https_errors=false`). Chỉ nên bật tùy chọn này trong môi trường test có certificate tự ký.
 
 Repository hiện đã ignore:
 
@@ -521,6 +559,7 @@ auth.json
 .env
 .env.*
 processed.json
+pending_comments.json
 bot_health.json
 account_identities.json
 session_username.txt
@@ -543,7 +582,7 @@ Nếu API key từng bị lộ ở nơi công khai, hãy revoke key cũ và tạ
 - Chưa xử lý ảnh và OCR.
 - Chưa đọc PPT/PPTX.
 - Bot comment qua UI của LMS; nếu chức năng comment bị tắt hoặc selector đổi, bot sẽ báo không tìm thấy ô/nút comment.
-- `processed.json` chỉ ghi bài sau khi comment thành công; nếu AI hoặc comment lỗi, bài có thể được thử lại ở vòng quét sau.
+- Entry chỉ vào `processed.json` sau khi comment đã được xác minh trên LMS. Nếu AI/comment lỗi tạm thời, bài được thử lại; nếu đã có pending answer thì bot tái sử dụng answer đó thay vì gọi AI lần nữa.
 
 ---
 
@@ -559,7 +598,7 @@ Nếu API key từng bị lộ ở nơi công khai, hãy revoke key cũ và tạ
 8. Đóng cửa sổ launcher khi muốn dừng toàn bộ bot.
 ---
 
-## 16. Kiểm thử runtime safety
+## 16. Kiểm thử và CI
 
 Chạy bộ test không cần truy cập LMS:
 
@@ -567,12 +606,10 @@ Chạy bộ test không cần truy cập LMS:
 .\.venv\Scripts\python.exe -m unittest discover -s tests -v
 ```
 
-Bộ test hiện kiểm tra:
+Bộ test hiện bao phủ các nhóm quan trọng: atomic state/health, state cap + backup recovery/fail-closed, pending comment lifecycle, không gọi AI lần hai khi đã có pending answer, pagination/deep-scan backlog, scan floor của `only_new_posts`, config validation, retry permanent AI error, log retention và attachment cleanup.
 
-- `processed.json` ghi atomic và bị giới hạn kích thước theo số ID.
-- `bot_health.json` ghi atomic, không để lại file `.tmp`.
-- Log archive được giới hạn số lượng/thời gian lưu.
-- File đính kèm tạm quá hạn được xóa và thư mục rỗng được dọn.
-- Logic giữ các `entryid` mới hơn khi state vượt giới hạn.
+`.github/workflows/tests.yml` tự chạy compile + unit test trên Python 3.13 và `pip-audit` cho mỗi push/pull request. `dependabot.yml` theo dõi cả Python dependency lẫn GitHub Actions theo tuần.
 
-Các test vận hành thực tế đã dùng khi phát triển gồm: mở nhiều instance cùng lúc, kill browser Playwright để kiểm tra tự phục hồi, ép ngưỡng RAM thấp để kiểm tra exit code `75` + auto restart, và giả lập heartbeat stale để kiểm tra supervisor terminate Job Object.
+Ngoài unit test, khi phát triển đã thực hiện các test vận hành thật: mở nhiều instance cùng lúc, kill browser Playwright để kiểm tra tự phục hồi, ép ngưỡng RAM thấp để kiểm tra exit code `75` + auto restart, giả lập heartbeat stale, đăng nhập thật với TLS validation bật, quét Blog thật và xác minh cơ chế nhận diện comment đã tồn tại mà không gửi comment mới.
+
+Đã test cài `requirements.txt` trong một virtualenv sạch rồi chạy toàn bộ test; dependency audit hiện không phát hiện lỗ hổng đã biết.

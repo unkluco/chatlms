@@ -1,4 +1,5 @@
 @echo off
+setlocal EnableExtensions EnableDelayedExpansion
 chcp 65001 >nul
 cd /d "%~dp0"
 title IUH LMS BLOG BOT
@@ -115,6 +116,18 @@ if errorlevel 1 (
 REM ==================================================
 REM 4. Kiem tra dependency
 REM ==================================================
+if exist "%~dp0requirements.txt" (
+    echo [SETUP] Dang dong bo dependency theo requirements.txt...
+    "%VPY%" -m pip install --disable-pip-version-check -r "%~dp0requirements.txt"
+    if errorlevel 1 (
+        echo [ERROR] Khong dong bo duoc dependency pinned.
+        pause
+        exit /b 1
+    )
+    echo [OK] Dependency pinned da san sang.
+    goto DEPENDENCIES_READY
+)
+
 "%VPY%" -c "import playwright" >nul 2>&1
 if errorlevel 1 (
     echo [SETUP] Chua co Playwright trong .venv.
@@ -176,6 +189,8 @@ if errorlevel 1 (
     echo [OK] psutil da co san trong .venv.
 )
 
+:DEPENDENCIES_READY
+
 REM ==================================================
 REM 5. Chay bot
 REM ==================================================
@@ -185,19 +200,34 @@ echo [START] Khoi dong bot...
 echo ==========================================
 echo.
 
-set "RESTART_DELAY=5"
+set /a RESTART_COUNT=0
 
 :RUN_SUPERVISED
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0RUN_BOT_JOB.ps1" -PythonExe "%VPY%" -ScriptPath "%~dp0lms_blog_bot.py"
-set "BOT_EXIT=%ERRORLEVEL%"
+set "BOT_EXIT=!ERRORLEVEL!"
 
-if "%BOT_EXIT%"=="75" (
-    echo.
-    echo [WATCHDOG] Bot bi treo/stale. Tu khoi dong lai sau %RESTART_DELAY%s...
-    powershell.exe -NoProfile -Command "Start-Sleep -Seconds %RESTART_DELAY%"
-    goto RUN_SUPERVISED
-)
+if "!BOT_EXIT!"=="0" goto BOT_DONE
+if "!BOT_EXIT!"=="2" goto BOT_DONE
+if "!BOT_EXIT!"=="3" goto BOT_DONE
+
+set /a RESTART_COUNT+=1
+set "RESTART_DELAY=5"
+if !RESTART_COUNT! GEQ 2 set "RESTART_DELAY=10"
+if !RESTART_COUNT! GEQ 3 set "RESTART_DELAY=30"
+if !RESTART_COUNT! GEQ 4 set "RESTART_DELAY=60"
+if !RESTART_COUNT! GEQ 5 set "RESTART_DELAY=300"
 
 echo.
-echo Bot da dung. Exit code: %BOT_EXIT%
+if "!BOT_EXIT!"=="75" (
+    echo [WATCHDOG] Bot yeu cau restart/tam thoi bi treo.
+) else (
+    echo [WATCHDOG] Bot dung bat thuong voi exit code !BOT_EXIT!.
+)
+echo [WATCHDOG] Tu khoi dong lai sau !RESTART_DELAY!s...
+powershell.exe -NoProfile -Command "Start-Sleep -Seconds !RESTART_DELAY!"
+goto RUN_SUPERVISED
+
+:BOT_DONE
+echo.
+echo Bot da dung. Exit code: !BOT_EXIT!
 pause

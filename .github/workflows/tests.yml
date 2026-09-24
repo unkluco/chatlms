@@ -1,0 +1,29 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  unit-tests:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: "pip"
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt
+      - name: Compile
+        run: python -m compileall -q .
+      - name: Run unit tests
+        run: python -m unittest discover -s tests -v
+      - name: Install QA tools
+        run: python -m pip install --disable-pip-version-check pip-audit ruff bandit
+      - name: Static correctness checks
+        run: ruff check --select F,E9,I lms_blog_bot.py health_monitor.py tests
+      - name: Static security scan
+        run: bandit -q -r lms_blog_bot.py health_monitor.py -ll
+      - name: Audit Python dependencies
+        run: python -m pip_audit -r requirements.txt

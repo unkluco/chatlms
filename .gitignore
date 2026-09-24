@@ -66,3 +66,4 @@ bot_health.json
 # Runtime supervisor state
 .bot_runtime/
 logs/
+pending_comments.json

@@ -1,0 +1,55 @@
+{
+  "lms_base_url": "https://lms.iuh.edu.vn",
+  "username": "YOUR_LMS_USERNAME",
+  "password": "YOUR_LMS_PASSWORD",
+  "provider": "groq",
+  "groq_api_key": "YOUR_GROQ_API_KEY",
+  "ai_model": "openai/gpt-oss-120b",
+  "detect_pattern": "@bot",
+  "default_system_prompt": "Tra loi dung trong tam, ro rang va huu ich.",
+  "poll_interval_seconds": 6,
+  "max_posts_per_scan": 10,
+  "fast_scan_pages": 1,
+  "deep_scan_interval_seconds": 300,
+  "deep_scan_max_posts": 500,
+  "deep_scan_max_pages": 100,
+  "max_answer_length": 6000,
+  "retry_count": 2,
+  "retry_delay_seconds": 2,
+  "retry_max_delay_seconds": 30,
+  "cooldown_seconds": 0,
+  "ignored_recheck_seconds": 300,
+  "only_new_posts": true,
+  "trigger_position": "title",
+  "debug": false,
+  "headless": true,
+  "ignore_https_errors": false,
+  "reconnect_delay_seconds": 5,
+  "login_retry_seconds": 5,
+  "health_interval_seconds": 60,
+  "maintenance_interval_seconds": 3600,
+  "browser_restart_hours": 6,
+  "max_python_memory_mb": 800,
+  "max_browser_children_memory_mb": 1500,
+  "watchdog_stale_seconds": 600,
+  "watchdog_check_seconds": 15,
+  "commands": {
+    "#short": {
+      "system_prompt": "Tra loi that ngan gon, chi neu y chinh can thiet."
+    },
+    "#code": {
+      "system_prompt": "Uu tien giai thich theo huong lap trinh va dua code khi phu hop."
+    },
+    "#nocmt": {
+      "system_prompt": "Neu tra loi code thi chi dua cau tra loi truc tiep, khong them comment giai thich."
+    }
+  },
+  "attachments": {
+    "enabled": true,
+    "max_file_size_mb": 15,
+    "max_files_per_post": 3,
+    "max_extracted_chars_per_file": 20000,
+    "max_total_attachment_chars": 40000,
+    "delete_after_processing": true
+  }
+}
