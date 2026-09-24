@@ -61,6 +61,16 @@ def entry_url(eid):
 
 
 class CoreBehaviorTests(unittest.TestCase):
+    def setUp(self):
+        self._log_tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._log_tmp.cleanup)
+        self._old_log_dir = bot.LOG_DIR
+        self._old_log_file = bot.LOG_FILE
+        bot.LOG_DIR = Path(self._log_tmp.name)
+        bot.LOG_FILE = bot.LOG_DIR / "bot.log"
+        self.addCleanup(setattr, bot, "LOG_DIR", self._old_log_dir)
+        self.addCleanup(setattr, bot, "LOG_FILE", self._old_log_file)
+
     def test_pagination_skips_processed_first_page_and_reaches_backlog(self):
         base = "https://example.test/blog/index.php?userid=1"
         p2 = base + "&page=1"

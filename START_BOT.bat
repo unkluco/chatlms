@@ -203,13 +203,18 @@ echo.
 set /a RESTART_COUNT=0
 
 :RUN_SUPERVISED
+for /f %%T in ('powershell.exe -NoProfile -Command "[DateTimeOffset]::UtcNow.ToUnixTimeSeconds()"') do set "RUN_STARTED=%%T"
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0RUN_BOT_JOB.ps1" -PythonExe "%VPY%" -ScriptPath "%~dp0lms_blog_bot.py"
 set "BOT_EXIT=!ERRORLEVEL!"
+for /f %%T in ('powershell.exe -NoProfile -Command "[DateTimeOffset]::UtcNow.ToUnixTimeSeconds()"') do set "RUN_ENDED=%%T"
+set /a RUN_SECONDS=RUN_ENDED-RUN_STARTED
 
 if "!BOT_EXIT!"=="0" goto BOT_DONE
 if "!BOT_EXIT!"=="2" goto BOT_DONE
 if "!BOT_EXIT!"=="3" goto BOT_DONE
 
+REM Neu bot da chay on dinh it nhat 10 phut, reset backoff.
+if !RUN_SECONDS! GEQ 600 set /a RESTART_COUNT=0
 set /a RESTART_COUNT+=1
 set "RESTART_DELAY=5"
 if !RESTART_COUNT! GEQ 2 set "RESTART_DELAY=10"

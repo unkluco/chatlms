@@ -82,7 +82,7 @@ Launcher hiện thực hiện các bước:
 3. Nếu có `requirements.txt`, đồng bộ đúng các phiên bản dependency đã pin.
 4. Nếu không có file pin, fallback sang kiểm tra/cài riêng Playwright, Groq, thư viện đọc file và `psutil`.
 5. Gọi `RUN_BOT_JOB.ps1` để chạy bot trong Windows Job Object và giám sát heartbeat.
-6. Nếu bot dừng bất thường hoặc yêu cầu restart, launcher tự chạy lại với backoff 5 → 10 → 30 → 60 → tối đa 300 giây.
+6. Nếu bot dừng bất thường hoặc yêu cầu restart, launcher tự chạy lại với backoff 5 → 10 → 30 → 60 → tối đa 300 giây; nếu phiên trước đã chạy ổn định ít nhất 10 phút thì bộ đếm backoff được reset về đầu.
 7. Exit code `2` (đã có instance khác) và `3` (config/state/AI permanent error) sẽ dừng thay vì restart vô hạn.
 
 Khi đóng cửa sổ `START_BOT.bat`, Job Object sẽ dừng cả Python và browser con của bot, tránh tình trạng bot vẫn chạy ngầm.
