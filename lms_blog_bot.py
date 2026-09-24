@@ -4,7 +4,7 @@ from datetime import datetime
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
-from health_monitor import write_health, cleanup_old_attachments, get_process_memory_mb, should_restart_browser, find_browser_memory_mb
+from health_monitor import write_health, cleanup_old_attachments, get_process_memory_mb, find_browser_memory_mb
 
 ROOT = Path(__file__).resolve().parent
 CONFIG_PATH = ROOT / "config.json"
@@ -17,6 +17,9 @@ RUNTIME_DIR = ROOT / ".bot_runtime"
 PID_PATH = RUNTIME_DIR / "bot.pid"
 LOG_DIR = ROOT / "logs"
 LOG_FILE = LOG_DIR / "bot.log"
+MAX_PROCESSED_PER_ACCOUNT = 50000
+LOG_RETENTION_DAYS = 30
+MAX_LOG_ARCHIVES = 30
 
 TEXT_EXTENSIONS = {
     ".txt", ".md", ".markdown", ".py", ".java", ".c", ".cc", ".cpp", ".cxx",
@@ -26,6 +29,29 @@ TEXT_EXTENSIONS = {
 }
 SUPPORTED_ATTACHMENT_EXTENSIONS = TEXT_EXTENSIONS | {".pdf", ".docx", ".xlsx", ".csv"}
 
+def cleanup_old_logs(retention_days=LOG_RETENTION_DAYS, max_archives=MAX_LOG_ARCHIVES):
+    try:
+        if not LOG_DIR.exists():
+            return 0
+        cutoff = time.time() - max(1, retention_days) * 86400
+        archives = sorted(
+            LOG_DIR.glob("bot-*.log"),
+            key=lambda path: path.stat().st_mtime,
+            reverse=True,
+        )
+        removed = 0
+        for index, path in enumerate(archives):
+            try:
+                if index >= max_archives or path.stat().st_mtime < cutoff:
+                    path.unlink(missing_ok=True)
+                    removed += 1
+            except Exception:
+                continue
+        return removed
+    except Exception:
+        return 0
+
+
 def log(msg):
     line = f"[{datetime.now().strftime('%H:%M:%S')}] {msg}"
     print(line, flush=True)
@@ -34,6 +60,7 @@ def log(msg):
         if LOG_FILE.exists() and LOG_FILE.stat().st_size > 10 * 1024 * 1024:
             backup = LOG_DIR / f"bot-{datetime.now().strftime('%Y%m%d-%H%M%S')}.log"
             LOG_FILE.replace(backup)
+            cleanup_old_logs()
         with LOG_FILE.open("a", encoding="utf-8") as f:
             f.write(line + "\n")
     except Exception:
@@ -121,6 +148,19 @@ def load_processed(account_key="default"):
     except Exception:
         return set()
 
+def _trim_processed_ids(items, limit=MAX_PROCESSED_PER_ACCOUNT):
+    values = list({str(value) for value in items})
+    if len(values) <= limit:
+        return sorted(values, key=lambda value: (0, int(value)) if value.isdigit() else (1, value))
+
+    numeric = [value for value in values if value.isdigit()]
+    other = [value for value in values if not value.isdigit()]
+    numeric.sort(key=int)
+    other.sort()
+    combined = numeric + other
+    return combined[-limit:]
+
+
 def save_processed(items, account_key="default"):
     data = {"accounts": {}}
     if STATE_PATH.exists():
@@ -132,7 +172,12 @@ def save_processed(items, account_key="default"):
                 data["accounts"]["legacy"] = old["processed_entry_ids"]
         except Exception:
             pass
-    data.setdefault("accounts", {})[account_key] = sorted(map(str, items))
+
+    accounts = data.setdefault("accounts", {})
+    for key, values in list(accounts.items()):
+        accounts[key] = _trim_processed_ids(values)
+    accounts[account_key] = _trim_processed_ids(items)
+
     # Ghi atomic: tranh hong processed.json neu may mat dien/crash dung luc ghi.
     tmp_path = STATE_PATH.with_suffix(".json.tmp")
     tmp_path.write_text(
@@ -867,11 +912,15 @@ def main():
     limit = max(1, int(cfg.get("max_posts_per_scan", 10)))
     cooldown = max(0.0, float(cfg.get("cooldown_seconds", 0)))
     health_interval = max(30, int(cfg.get("health_interval_seconds", 60)))
+    maintenance_interval = max(300, int(cfg.get("maintenance_interval_seconds", 3600)))
     browser_restart_hours = max(1, float(cfg.get("browser_restart_hours", 6)))
+    max_python_memory_mb = max(256, int(cfg.get("max_python_memory_mb", 800)))
+    max_browser_children_memory_mb = max(512, int(cfg.get("max_browser_children_memory_mb", 1500)))
     reconnect_delay = max(2, int(cfg.get("reconnect_delay_seconds", 5)))
     provider = str(cfg.get("provider", "groq") or "groq")
     model = str(cfg.get("ai_model", "")).strip() or "openai/gpt-oss-120b"
 
+    cleanup_old_logs()
     log("=== IUH LMS BLOG BOT ===")
     write_health("starting")
     names = ", ".join(commands.keys()) if isinstance(commands, dict) else "(none)"
@@ -894,6 +943,7 @@ def main():
     # Ghi nho tai khoan da khoi tao scan trong process hien tai.
     initialized_accounts = set()
     last_health = 0
+    last_maintenance = 0
     browser_started_at = time.time()
 
     with sync_playwright() as pw:
@@ -931,11 +981,39 @@ def main():
 
                 while True:
                     try:
-                        if time.time() - last_health >= health_interval:
-                            removed = cleanup_old_attachments(ATTACHMENT_DIR, 24)
-                            write_health("running", account=account_key, removed_temp_files=removed)
-                            last_health = time.time()
-                        if time.time() - browser_started_at >= browser_restart_hours * 3600:
+                        now = time.time()
+                        removed_temp_files = 0
+                        removed_log_files = 0
+
+                        if now - last_maintenance >= maintenance_interval:
+                            removed_temp_files = cleanup_old_attachments(ATTACHMENT_DIR, 24)
+                            removed_log_files = cleanup_old_logs()
+                            last_maintenance = now
+
+                        if now - last_health >= health_interval:
+                            python_memory_mb = get_process_memory_mb()
+                            browser_children_mb = find_browser_memory_mb(os.getpid())
+                            write_health(
+                                "running",
+                                account=account_key,
+                                memory_mb=python_memory_mb,
+                                browser_children_mb=browser_children_mb,
+                                removed_temp_files=removed_temp_files,
+                                removed_log_files=removed_log_files,
+                            )
+                            last_health = now
+                            if (
+                                (python_memory_mb or 0) > max_python_memory_mb
+                                or (browser_children_mb or 0) > max_browser_children_memory_mb
+                            ):
+                                log(
+                                    "Phat hien bo nho bot vuot nguong "
+                                    f"(Python={python_memory_mb}MB, children={browser_children_mb}MB). "
+                                    "Yeu cau supervisor khoi dong lai toan bo process."
+                                )
+                                raise RuntimeError("process_restart_required")
+
+                        if now - browser_started_at >= browser_restart_hours * 3600:
                             log("Browser da chay du chu ky. Restart de giai phong tai nguyen.")
                             raise RuntimeError("browser_restart_required")
 
@@ -955,11 +1033,6 @@ def main():
                             finally:
                                 in_progress.discard(eid)
 
-                        removed = cleanup_old_attachments(ATTACHMENT_DIR, 24)
-                        write_health("running", account=account_key, memory_mb=get_process_memory_mb(), browser_children_mb=find_browser_memory_mb(os.getpid()), removed_files=removed)
-                        if should_restart_browser(800) or (find_browser_memory_mb(os.getpid()) or 0) > 1500:
-                            log("Phat hien bo nho Python/Chrome bot cao. Khoi tao lai browser de don bo nho.")
-                            raise RuntimeError("browser_restart_required")
                         time.sleep(interval)
 
                     except KeyboardInterrupt:
@@ -987,7 +1060,7 @@ def main():
                             log(f"Dang nhap lai dung tai khoan: {display_name or expected_username} | userid={user_id}")
                             continue
 
-                        if code == "browser_restart_required":
+                        if code in ("browser_restart_required", "process_restart_required"):
                             raise
 
                         log(f"Loi tac vu: {exc}")
@@ -1008,6 +1081,12 @@ def main():
                 return 0
 
             except Exception as exc:
+                if str(exc) == "process_restart_required":
+                    log("Supervisor se khoi dong lai toan bo bot de giai phong tai nguyen.")
+                    write_health("restarting_process", memory_mb=get_process_memory_mb(), browser_children_mb=find_browser_memory_mb(os.getpid()))
+                    clear_runtime_pid()
+                    release_single_instance(instance_lock)
+                    return 75
                 if str(exc) == "browser_restart_required":
                     log("Can khoi tao lai phien browser.")
                 else:

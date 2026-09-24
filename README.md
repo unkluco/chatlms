@@ -8,6 +8,9 @@ Bot theo dõi Blog cá nhân trên LMS IUH, tìm bài có mẫu kích hoạt, g�
 - Giữ session bằng profile riêng `.browser_profile`; trước khi dùng lại bot xác minh `userid` và tên hiển thị đúng với tài khoản `username` trong `config.json`.
 - Tự đăng nhập lại khi session hết hạn hoặc bị văng khỏi LMS.
 - Tự reconnect và tạo lại browser khi mất mạng/browser lỗi; host không tự dừng vì một lỗi tạm thời.
+- Tự restart browser định kỳ để giải phóng cache/tài nguyên Playwright.
+- Theo dõi RAM Python + toàn bộ process con Playwright/Chrome; nếu vượt ngưỡng thì yêu cầu supervisor restart toàn bộ bot.
+- Ghi heartbeat vào `bot_health.json`; `RUN_BOT_JOB.ps1` giám sát heartbeat từ bên ngoài và trả exit code `75` khi bot treo/stale để `START_BOT.bat` tự khởi động lại.
 - Tự xác định `userid` của tài khoản trong `config.json`; nếu persistent session đang là tài khoản cũ/khác, bot tự xóa cookie và đăng nhập lại đúng tài khoản.
 - Quét Blog theo chu kỳ và chỉ xử lý bài có mẫu kích hoạt.
 - Hỗ trợ tìm mẫu kích hoạt trong tiêu đề, nội dung hoặc cả hai.
@@ -15,6 +18,9 @@ Bot theo dõi Blog cá nhân trên LMS IUH, tìm bài có mẫu kích hoạt, g�
 - Đọc file đính kèm: PDF, DOCX, XLSX, CSV và nhiều định dạng text/code.
 - Giới hạn số file, dung lượng và lượng text trích xuất để tránh prompt quá lớn.
 - Lưu `processed.json` tách theo khóa `username:userid` để tránh comment lặp và không lẫn trạng thái giữa nhiều tài khoản.
+- Ghi `processed.json` và `bot_health.json` theo kiểu atomic (`.tmp` → replace) để giảm nguy cơ hỏng JSON khi crash/mất điện lúc đang ghi.
+- Log ra console đồng thời ghi `logs/bot.log`; tự rotate khi log vượt 10 MB.
+- Tự dọn file đính kèm tạm cũ còn sót trong `.attachments`.
 - Chống chạy hai bot đồng thời trong cùng project/browser profile trên Windows bằng single-instance mutex.
 - Chạy trong Windows Job Object: đóng cửa sổ launcher thì Python và browser của bot cũng dừng theo.
 - Tự tạo `.venv` và tự cài dependency cần thiết khi chạy `START_BOT.bat`.
@@ -27,6 +33,9 @@ Bot theo dõi Blog cá nhân trên LMS IUH, tìm bài có mẫu kích hoạt, g�
 - Thêm đọc nội dung file đính kèm trực tiếp từ bài Blog.
 - Thêm `in_progress` + single-instance mutex để giảm nguy cơ comment trùng.
 - Thêm Windows Job Object để đóng launcher là dừng luôn Python và browser của bot.
+- Thêm supervisor/watchdog ngoài process Python: phát hiện heartbeat stale, dừng cả Job Object và cho launcher tự restart bot.
+- Thêm memory watchdog và chu kỳ restart browser phục vụ chạy 24/7 lâu dài.
+- Thêm atomic write cho state/health và log rotation.
 - Sửa `only_new_posts` để baseline chỉ được tạo khi tài khoản chưa có state; restart/reconnect không đánh dấu lại các bài mới thành bài cũ.
 
 ---
@@ -72,7 +81,9 @@ Launcher hiện thực hiện các bước:
 3. Cài/kiểm tra `playwright`.
 4. Cài/kiểm tra `groq`.
 5. Cài/kiểm tra `pypdf`, `python-docx`, `openpyxl`.
-6. Gọi `RUN_BOT_JOB.ps1` để chạy bot trong Windows Job Object.
+6. Cài/kiểm tra `psutil` cho health/memory watchdog.
+7. Gọi `RUN_BOT_JOB.ps1` để chạy bot trong Windows Job Object và giám sát heartbeat.
+8. Nếu supervisor trả exit code `75`, launcher chờ 5 giây rồi tự khởi động lại bot.
 
 Khi đóng cửa sổ `START_BOT.bat`, Job Object sẽ dừng cả Python và browser con của bot, tránh tình trạng bot vẫn chạy ngầm.
 
@@ -104,6 +115,13 @@ Ví dụ cấu hình đang phù hợp với phiên bản hiện tại:
   "headless": true,
   "reconnect_delay_seconds": 5,
   "login_retry_seconds": 5,
+  "health_interval_seconds": 60,
+  "maintenance_interval_seconds": 3600,
+  "browser_restart_hours": 6,
+  "max_python_memory_mb": 800,
+  "max_browser_children_memory_mb": 1500,
+  "watchdog_stale_seconds": 600,
+  "watchdog_check_seconds": 15,
   "commands": {
     "#short": {
       "system_prompt": "Trả lời thật ngắn gọn, chỉ nêu ý chính cần thiết."
@@ -171,6 +189,20 @@ Nếu dùng `title`, phần nội dung sau mẫu kích hoạt trong tiêu đề 
 
 `login_retry_seconds`: thời gian chờ giữa các lần thử đăng nhập LMS.
 
+`health_interval_seconds`: chu kỳ heartbeat/health và kiểm tra RAM. Code ép tối thiểu 30 giây.
+
+`maintenance_interval_seconds`: chu kỳ dọn file đính kèm tạm và log archive cũ. Mặc định 3600 giây, ép tối thiểu 300 giây để tránh quét ổ đĩa quá thường xuyên.
+
+`browser_restart_hours`: số giờ một browser session được giữ trước khi chủ động tạo lại. Mặc định 6 giờ.
+
+`max_python_memory_mb`: ngưỡng RAM của process Python. Khi vượt ngưỡng, bot yêu cầu supervisor restart toàn bộ process để giải phóng RAM thực sự. Mặc định 800 MB.
+
+`max_browser_children_memory_mb`: ngưỡng tổng RAM process con của bot (Playwright driver + Chrome của bot). Mặc định 1500 MB; không cộng Chrome cá nhân không thuộc process tree của bot.
+
+`watchdog_stale_seconds`: heartbeat quá cũ bao lâu thì `RUN_BOT_JOB.ps1` coi bot bị treo. Mặc định 600 giây, supervisor ép tối thiểu 120 giây.
+
+`watchdog_check_seconds`: chu kỳ supervisor kiểm tra heartbeat. Mặc định 15 giây, ép tối thiểu 5 giây.
+
 ---
 
 ## 4. Cơ chế đăng nhập và tự phục hồi
@@ -204,7 +236,11 @@ Nếu trong lúc chạy:
 - Session LMS hết → bot tự đăng nhập lại và tiếp tục quét.
 - Browser bị đóng/kết nối Playwright chết → bot tạo lại browser.
 - Mạng/LMS lỗi tạm thời → bot giữ host sống, chờ `reconnect_delay_seconds` rồi thử lại.
+- RAM Python hoặc process tree Playwright/Chrome vượt ngưỡng → Python thoát với code `75`; launcher tự chạy lại toàn bộ process sau 5 giây.
+- Heartbeat `bot_health.json` mất/quá cũ → `RUN_BOT_JOB.ps1` terminate cả Job Object và trả code `75` để launcher tự phục hồi.
 - CAPTCHA/MFA xuất hiện hoặc giao diện LMS thay đổi lớn → có thể cần cập nhật code.
+
+Supervisor chạy ở PowerShell bên ngoài process Python. Vì vậy trường hợp Python bị deadlock/treo cứng và không còn tự xử lý được vẫn có một lớp khác theo dõi heartbeat. Trong giai đoạn khởi động supervisor cho phép grace period 120 giây để tránh kill nhầm lúc login/browser đang mở.
 
 ---
 
@@ -301,7 +337,7 @@ Bot có nhiều lớp bảo vệ:
 
 ### `processed.json`
 
-Lưu `entryid` theo từng khóa `username:userid`. Vì vậy hai tài khoản khác nhau có thể có cùng `entryid` mà không bị coi nhầm là đã xử lý.
+Lưu `entryid` theo từng khóa `username:userid`. Vì vậy hai tài khoản khác nhau có thể có cùng `entryid` mà không bị coi nhầm là đã xử lý. State được giới hạn tối đa 50.000 ID cho mỗi tài khoản để file không tăng vô hạn; bot ưu tiên giữ các ID entry mới hơn.
 
 Muốn test lại bài cũ:
 
@@ -429,6 +465,16 @@ Can khoi tao lai phien browser.
 Host van dang chay. Cho 5s roi ket noi lai...
 ```
 
+Khi memory watchdog yêu cầu restart toàn bộ process:
+
+```text
+Phat hien bo nho bot vuot nguong (...)
+Supervisor se khoi dong lai toan bo bot de giai phong tai nguyen.
+[WATCHDOG] Bot bi treo/stale. Tu khoi dong lai sau 5s...
+```
+
+Log đồng thời được ghi vào `logs/bot.log`. Khi file vượt 10 MB, bot đổi tên file cũ theo timestamp rồi tạo `bot.log` mới. Archive log cũ hơn 30 ngày hoặc vượt 30 file archive sẽ được dọn để thư mục log không tăng vô hạn. `bot_health.json` chứa heartbeat hiện tại, PID, tài khoản đang chạy và số liệu RAM gần nhất.
+
 ---
 
 ## 12. Cấu trúc project
@@ -436,16 +482,22 @@ Host van dang chay. Cho 5s roi ket noi lai...
 ```text
 lms_bot/
 ├─ lms_blog_bot.py       # Logic chính
-├─ START_BOT.bat         # Launcher, tạo venv + dependency
-├─ RUN_BOT_JOB.ps1       # Windows Job Object, quản lý process con
+├─ health_monitor.py     # Heartbeat, RAM monitor, cleanup runtime
+├─ START_BOT.bat         # Launcher, tạo venv + dependency + auto restart code 75
+├─ RUN_BOT_JOB.ps1       # Job Object + external heartbeat watchdog
 ├─ RESET_PROCESSED.bat   # Xóa trạng thái bài đã xử lý
 ├─ config.json           # Secret/local config, không commit
 ├─ processed.json        # Runtime state theo username:userid, không commit
+├─ bot_health.json       # Heartbeat/health runtime, không commit
 ├─ account_identities.json # Cache username -> userid + display_name, không commit
 ├─ session_username.txt  # Username session gần nhất, không commit
+├─ .bot_runtime/         # PID/runtime state, không commit
+├─ logs/                 # Log runtime/rotated logs, không commit
 ├─ .browser_profile/     # Cookie/session browser, không commit
 ├─ .attachments/         # File LMS tải tạm, không commit
 ├─ .venv/                # Python virtual environment
+├─ tests/
+│  └─ test_runtime_safety.py # Test atomic state/health, state cap, log retention
 └─ README.md
 ```
 
@@ -469,8 +521,11 @@ auth.json
 .env
 .env.*
 processed.json
+bot_health.json
 account_identities.json
 session_username.txt
+.bot_runtime/
+logs/
 .browser_profile/
 .attachments/
 .venv/
@@ -502,3 +557,22 @@ Nếu API key từng bị lộ ở nơi công khai, hãy revoke key cũ và tạ
 6. Lưu bài.
 7. Bot phát hiện → gọi AI → đăng comment.
 8. Đóng cửa sổ launcher khi muốn dừng toàn bộ bot.
+---
+
+## 16. Kiểm thử runtime safety
+
+Chạy bộ test không cần truy cập LMS:
+
+```text
+.\.venv\Scripts\python.exe -m unittest discover -s tests -v
+```
+
+Bộ test hiện kiểm tra:
+
+- `processed.json` ghi atomic và bị giới hạn kích thước theo số ID.
+- `bot_health.json` ghi atomic, không để lại file `.tmp`.
+- Log archive được giới hạn số lượng/thời gian lưu.
+- File đính kèm tạm quá hạn được xóa và thư mục rỗng được dọn.
+- Logic giữ các `entryid` mới hơn khi state vượt giới hạn.
+
+Các test vận hành thực tế đã dùng khi phát triển gồm: mở nhiều instance cùng lúc, kill browser Playwright để kiểm tra tự phục hồi, ép ngưỡng RAM thấp để kiểm tra exit code `75` + auto restart, và giả lập heartbeat stale để kiểm tra supervisor terminate Job Object.

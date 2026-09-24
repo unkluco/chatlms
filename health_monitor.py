@@ -17,10 +17,12 @@ def write_health(status="running", **extra):
         **extra,
     }
     try:
-        HEALTH_PATH.write_text(
+        tmp_path = HEALTH_PATH.with_suffix(".json.tmp")
+        tmp_path.write_text(
             json.dumps(data, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
+        tmp_path.replace(HEALTH_PATH)
     except Exception:
         pass
 
@@ -39,6 +41,18 @@ def cleanup_old_attachments(folder, max_age_hours=24):
                     removed += 1
             except Exception:
                 continue
+
+        # Don cac thu muc entry rong con sot lai sau crash/cleanup.
+        directories = sorted(
+            (item for item in root.rglob("*") if item.is_dir()),
+            key=lambda item: len(item.parts),
+            reverse=True,
+        )
+        for directory in directories:
+            try:
+                directory.rmdir()
+            except OSError:
+                pass
         return removed
     except Exception:
         return 0
@@ -67,16 +81,6 @@ def get_children_memory_mb(pid):
         return round(total / 1024 / 1024, 2)
     except Exception:
         return None
-
-
-def should_restart_browser(max_python_mb=800):
-    memory = get_process_memory_mb()
-    return memory is not None and memory > max_python_mb
-
-
-def should_restart_browser_tree(browser_pid, max_children_mb=1500):
-    memory = get_children_memory_mb(browser_pid)
-    return memory is not None and memory > max_children_mb
 
 
 def find_browser_memory_mb(parent_pid):

@@ -161,6 +161,21 @@ if errorlevel 1 (
     echo [OK] Thu vien doc file dinh kem da co san trong .venv.
 )
 
+"%VPY%" -c "import psutil" >nul 2>&1
+if errorlevel 1 (
+    echo [SETUP] Chua co psutil cho health/memory watchdog.
+    echo [SETUP] Dang cai psutil CHI vao .venv...
+    "%VPY%" -m pip install psutil
+
+    if errorlevel 1 (
+        echo [ERROR] Cai psutil that bai.
+        pause
+        exit /b 1
+    )
+) else (
+    echo [OK] psutil da co san trong .venv.
+)
+
 REM ==================================================
 REM 5. Chay bot
 REM ==================================================
@@ -170,8 +185,19 @@ echo [START] Khoi dong bot...
 echo ==========================================
 echo.
 
+set "RESTART_DELAY=5"
+
+:RUN_SUPERVISED
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0RUN_BOT_JOB.ps1" -PythonExe "%VPY%" -ScriptPath "%~dp0lms_blog_bot.py"
+set "BOT_EXIT=%ERRORLEVEL%"
+
+if "%BOT_EXIT%"=="75" (
+    echo.
+    echo [WATCHDOG] Bot bi treo/stale. Tu khoi dong lai sau %RESTART_DELAY%s...
+    powershell.exe -NoProfile -Command "Start-Sleep -Seconds %RESTART_DELAY%"
+    goto RUN_SUPERVISED
+)
 
 echo.
-echo Bot da dung.
+echo Bot da dung. Exit code: %BOT_EXIT%
 pause

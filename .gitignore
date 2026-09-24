@@ -62,3 +62,7 @@ session_username.txt
 account_identities.json
 *.bak
 bot_health.json
+
+# Runtime supervisor state
+.bot_runtime/
+logs/

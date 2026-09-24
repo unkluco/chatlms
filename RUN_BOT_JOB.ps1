@@ -121,6 +121,9 @@ public static class BotJobNative
 
     [DllImport("kernel32.dll", SetLastError=true)]
     public static extern bool TerminateProcess(IntPtr hProcess, uint uExitCode);
+
+    [DllImport("kernel32.dll", SetLastError=true)]
+    public static extern bool TerminateJobObject(IntPtr hJob, uint uExitCode);
 }
 "@
 
@@ -135,6 +138,10 @@ if (-not (Test-Path -LiteralPath $PythonExe)) {
 if (-not (Test-Path -LiteralPath $ScriptPath)) {
     throw "Khong tim thay script bot: $ScriptPath"
 }
+
+# CreateProcess voi lpApplicationName on dinh hon khi dung duong dan tuyet doi.
+$PythonExe = (Resolve-Path -LiteralPath $PythonExe).Path
+$ScriptPath = (Resolve-Path -LiteralPath $ScriptPath).Path
 
 $job = [BotJobNative]::CreateJobObject([IntPtr]::Zero, $null)
 if ($job -eq [IntPtr]::Zero) {
@@ -167,6 +174,27 @@ $si.cb = [Runtime.InteropServices.Marshal]::SizeOf($si)
 $pi = New-Object BotJobNative+PROCESS_INFORMATION
 
 $workDir = Split-Path -Parent $ScriptPath
+$healthPath = Join-Path $workDir "bot_health.json"
+$configPath = Join-Path $workDir "config.json"
+$watchdogStaleSeconds = 600
+$watchdogCheckSeconds = 15
+$watchdogStartupGraceSeconds = 120
+
+try {
+    if (Test-Path -LiteralPath $configPath) {
+        $watchdogConfig = Get-Content -LiteralPath $configPath -Raw | ConvertFrom-Json
+        if ($null -ne $watchdogConfig.watchdog_stale_seconds) {
+            $watchdogStaleSeconds = [Math]::Max(120, [int]$watchdogConfig.watchdog_stale_seconds)
+        }
+        if ($null -ne $watchdogConfig.watchdog_check_seconds) {
+            $watchdogCheckSeconds = [Math]::Max(5, [int]$watchdogConfig.watchdog_check_seconds)
+        }
+    }
+}
+catch {
+    Write-Host "[WATCHDOG] Khong doc duoc config watchdog; dung gia tri mac dinh."
+}
+
 $cmd = '"' + $PythonExe + '" "' + $ScriptPath + '"'
 $cmdLine = New-Object Text.StringBuilder
 [void]$cmdLine.Append($cmd)
@@ -221,6 +249,9 @@ try {
     Write-Host "[JOB] Dong cua so nay se dung ca Python va browser cua bot."
 
     $parentGone = $false
+    $watchdogTriggered = $false
+    $processStartedAt = Get-Date
+    $lastWatchdogCheck = Get-Date
 
     while ($true) {
         if ($parentProcess) {
@@ -238,6 +269,33 @@ try {
             }
         }
 
+        $now = Get-Date
+        if (($now - $lastWatchdogCheck).TotalSeconds -ge $watchdogCheckSeconds) {
+            $lastWatchdogCheck = $now
+            $processAge = ($now - $processStartedAt).TotalSeconds
+            $healthFresh = $false
+
+            if (Test-Path -LiteralPath $healthPath) {
+                try {
+                    $health = Get-Content -LiteralPath $healthPath -Raw | ConvertFrom-Json
+                    $updatedAt = [datetime]::Parse($health.updated_at)
+                    $healthAge = ($now - $updatedAt).TotalSeconds
+                    $belongsToCurrentRun = $updatedAt -ge $processStartedAt.AddSeconds(-5)
+                    $healthFresh = $belongsToCurrentRun -and ($healthAge -lt $watchdogStaleSeconds)
+                }
+                catch {
+                    $healthFresh = $false
+                }
+            }
+
+            if (-not $healthFresh -and $processAge -ge $watchdogStartupGraceSeconds) {
+                Write-Host "[WATCHDOG] Heartbeat mat/qua cu. Dang terminate Job Object de khoi dong lai..."
+                [BotJobNative]::TerminateJobObject($job, 75) | Out-Null
+                $watchdogTriggered = $true
+                break
+            }
+        }
+
         $wait = [BotJobNative]::WaitForSingleObject($pi.hProcess, 500)
         if ($wait -eq 0) {
             break
@@ -247,7 +305,10 @@ try {
         }
     }
 
-    if (-not $parentGone) {
+    if ($watchdogTriggered) {
+        $finalExitCode = 75
+    }
+    elseif (-not $parentGone) {
         [uint32]$exitCode = 0
         if (-not [BotJobNative]::GetExitCodeProcess($pi.hProcess, [ref]$exitCode)) {
             Throw-Win32Error "Khong doc duoc exit code cua bot"
